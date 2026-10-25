@@ -1,0 +1,255 @@
+﻿<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Prueba de ExtensiÃ³n UVEG - Recursos Ordenados en Azul</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 860px;
+            margin: 40px auto 40px 385px;
+            padding: 0 20px;
+            background: #f8fafc;
+            color: #0f172a;
+            line-height: 1.5;
+        }
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #1e40af;
+            border-bottom: 2px solid #e2e8f0;
+            padding-bottom: 12px;
+        }
+        .simulador-url {
+            background: #1e293b;
+            color: #f1f5f9;
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 13px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .card {
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 18px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        iframe {
+            width: 100%;
+            height: 150px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            margin-top: 6px;
+            background: #f1f5f9;
+        }
+        textarea#pegado {
+            width: 100%;
+            height: 160px;
+            margin-top: 10px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1.5px solid #94a3b8;
+            font-family: monospace;
+            font-size: 13px;
+            box-sizing: border-box;
+            background: #fafafa;
+        }
+        .btn-accion {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: 0;
+            background: #1e40af;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 13px;
+            transition: background 0.15s;
+        }
+        .btn-accion:hover {
+            background: #1d4ed8;
+        }
+    </style>
+</head>
+<body>
+    <h1>Simulador UVEG: Recursos Ordenados (L1, L2, L3...) y DiseÃ±o Azul</h1>
+
+    <div class="simulador-url">
+        <span>ðŸŒ Campus Virtual UVEG (Vista de Curso)</span>
+        <span style="color:#60a5fa;font-size:11px;font-weight:700;">[Recursos Activos]</span>
+    </div>
+
+    <div class="card">
+        <h3>1. Probar Pegado aquÃ­ con Ctrl + V</h3>
+        <p style="font-size:13px;color:#64748b;margin:0 0 6px;">
+            Haz clic en el botÃ³n azul <strong>"Copiar"</strong> en cualquier tarjeta de la izquierda (o en <strong>"Copiar todo y cerrar"</strong>) y pega aquÃ­:
+        </p>
+        <textarea id="pegado" placeholder="Haz clic aquÃ­ y presiona Ctrl + V para verificar el formato..."></textarea>
+    </div>
+
+    <div class="card">
+        <h3>2. Recursos incrustados (Vienen en desorden en el cÃ³digo, pero la extensiÃ³n los presenta ordenados por tÃ­tulo)</h3>
+        <p style="font-size:13px;color:#64748b;">
+            Observa en la tarjeta flotante a la izquierda cÃ³mo aparecen ya ordenados por tÃ­tulo con su diseÃ±o en azul UVEG:
+        </p>
+
+        <div class="activity" style="margin-bottom:14px;">
+            <h4 class="instancename" style="margin:0 0 4px;color:#1e40af;">Reto 2 - Balanza de ComprobaciÃ³n y Asientos</h4>
+            <iframe
+                title="Reto 2 - Balanza de ComprobaciÃ³n y Asientos"
+                src="https://view.genially.com/600000000000000000000005">
+            </iframe>
+        </div>
+
+        <div class="activity" style="margin-bottom:14px;">
+            <h4 class="instancename" style="margin:0 0 4px;color:#1e40af;">L1 - PresentaciÃ³n de IntroducciÃ³n a la Contabilidad</h4>
+            <iframe
+                title="L1 - PresentaciÃ³n de IntroducciÃ³n a la Contabilidad"
+                src="https://view.genially.com/600000000000000000000001">
+            </iframe>
+        </div>
+
+        <div class="activity" style="margin-bottom:14px;">
+            <h4 class="instancename" style="margin:0 0 4px;color:#1e40af;">Reto 1 - Estados Financieros</h4>
+            <iframe
+                title="Reto 1 - Estados Financieros"
+                src="https://view.genially.com/600000000000000000000004">
+            </iframe>
+        </div>
+
+        <div class="activity" style="margin-bottom:14px;">
+            <h4 class="instancename" style="margin:0 0 4px;color:#1e40af;">L3 - Cierre Contable y Ajustes</h4>
+            <iframe
+                title="L3 - Cierre Contable y Ajustes"
+                src="https://view.genially.com/600000000000000000000003">
+            </iframe>
+        </div>
+
+        <div class="activity" style="margin-bottom:14px;">
+            <h4 class="instancename" style="margin:0 0 4px;color:#1e40af;">L2 - Registro de Operaciones y Cuentas T</h4>
+            <iframe
+                title="L2 - Registro de Operaciones y Cuentas T"
+                src="https://view.genially.com/600000000000000000000002">
+            </iframe>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>3. Pruebas de Scroll DinÃ¡mico (<= 6 sin scroll vs > 6 con scroll)</h3>
+        <p style="font-size:13px;color:#64748b;margin:0 0 10px;">
+            Prueba cÃ³mo la tarjeta flotante muestra todas las fichas de forma natural hasta 6 recursos, y a partir de que son mÃ¡s de 6 activa el scroll vertical mostrando 6 fichas fijas:
+        </p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button type="button" class="btn-accion" id="btn-dinamico">+ Insertar L4 (Total 6 recursos - sin scroll)</button>
+            <button type="button" class="btn-accion" id="btn-dinamico-10" style="background:#0284c7;">+ Insertar hasta 10 recursos (activa scroll > 6)</button>
+            <button type="button" class="btn-accion" id="btn-reset" style="background:#64748b;">Restablecer a 5</button>
+        </div>
+        <div id="contenedor-dinamico" style="margin-top:14px;"></div>
+    </div>
+
+    <div class="card">
+        <h3>4. Prueba de Apertura / Cierre por Curso (id=103 vs id=104)</h3>
+        <p style="font-size:13px;color:#64748b;margin:0 0 10px;">
+            Comprueba cÃ³mo al cerrar la tarjeta flotante dentro del <strong>id=103</strong> se mantiene cerrada aunque navegues a secciones hijas, y al cambiar a <strong>id=104</strong> se reinicia y vuelve a abrir:
+        </p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+            <button type="button" class="btn-accion" id="btn-curso-103" style="background:#1e40af;">1. Ir a Curso ?id=103</button>
+            <button type="button" class="btn-accion" id="btn-curso-103-hijo" style="background:#2563eb;">2. Navegar a Hijo (?id=103&mainsection=4&chall=9)</button>
+            <button type="button" class="btn-accion" id="btn-curso-104" style="background:#059669;">3. Cambiar a Nuevo Curso ?id=104 (Se reabre)</button>
+            <button type="button" class="btn-accion" id="btn-reset-sesion" style="background:#dc2626;">Resetear SesiÃ³n</button>
+        </div>
+        <div id="info-curso-actual" style="margin-top:12px;font-size:12px;font-family:monospace;background:#f1f5f9;padding:8px 12px;border-radius:6px;border:1px solid #cbd5e1;"></div>
+    </div>
+
+    <script>
+        const dinamico = document.getElementById('contenedor-dinamico');
+
+        document.getElementById('btn-dinamico').addEventListener('click', () => {
+            if (document.getElementById('item-din-l4')) return;
+            const wrap = document.createElement('div');
+            wrap.id = 'item-din-l4';
+            wrap.className = 'activity';
+            wrap.style.marginBottom = '14px';
+            wrap.innerHTML = `<h4 class="instancename" style="margin:8px 0 4px;color:#1e40af;">L4 - Estados de Resultados y Balance General</h4>`;
+            const ifr = document.createElement('iframe');
+            ifr.title = 'L4 - Estados de Resultados y Balance General';
+            ifr.src = 'https://view.genially.com/600000000000000000000006';
+            wrap.appendChild(ifr);
+            dinamico.appendChild(wrap);
+        });
+
+        document.getElementById('btn-dinamico-10').addEventListener('click', () => {
+            // Asegurar L4 primero
+            if (!document.getElementById('item-din-l4')) {
+                document.getElementById('btn-dinamico').click();
+            }
+            const extras = [
+                { id: 'l5', num: 'L5', titulo: 'L5 - Flujo de Efectivo y Razones Financieras', url: 'https://view.genially.com/600000000000000000000007' },
+                { id: 'l6', num: 'L6', titulo: 'L6 - AnÃ¡lisis de Costos y Punto de Equilibrio', url: 'https://view.genially.com/600000000000000000000008' },
+                { id: 'reto3', num: 'Reto 3', titulo: 'Reto 3 - Presupuesto Maestro y Operativo', url: 'https://view.genially.com/600000000000000000000009' },
+                { id: 'reto4', num: 'Reto 4', titulo: 'Reto 4 - Dictamen e Informe Contable Final', url: 'https://view.genially.com/600000000000000000000010' }
+            ];
+
+            extras.forEach(item => {
+                if (document.getElementById('item-din-' + item.id)) return;
+                const wrap = document.createElement('div');
+                wrap.id = 'item-din-' + item.id;
+                wrap.className = 'activity';
+                wrap.style.marginBottom = '14px';
+                wrap.innerHTML = `<h4 class="instancename" style="margin:8px 0 4px;color:#1e40af;">${item.titulo}</h4>`;
+                const ifr = document.createElement('iframe');
+                ifr.title = item.titulo;
+                ifr.src = item.url;
+                wrap.appendChild(ifr);
+                dinamico.appendChild(wrap);
+            });
+        });
+
+        document.getElementById('btn-reset').addEventListener('click', () => {
+            dinamico.innerHTML = '';
+        });
+
+        function actualizarInfoCurso() {
+            const url = window.location.href;
+            const match = url.match(/[?&]id=(\d+)/i);
+            const id = match ? match[1] : 'demo';
+            const cerrado = sessionStorage.getItem('uveg_curso_cerrado_' + id) === 'true';
+            document.getElementById('info-curso-actual').innerHTML =
+                `<strong>URL actual:</strong> ${url.split('/').pop()}<br>` +
+                `<strong>Curso ID:</strong> ${id} | <strong>Estado en sessionStorage:</strong> ${cerrado ? 'ðŸ”´ CERRADO (no se abrirÃ¡)' : 'ðŸŸ¢ ABIERTO (se abrirÃ¡)'}`;
+        }
+
+        document.getElementById('btn-curso-103').addEventListener('click', () => {
+            history.pushState({}, '', '?id=103&mainsection=2');
+            actualizarInfoCurso();
+        });
+
+        document.getElementById('btn-curso-103-hijo').addEventListener('click', () => {
+            history.pushState({}, '', '?id=103&mainsection=4&chall=9');
+            actualizarInfoCurso();
+        });
+
+        document.getElementById('btn-curso-104').addEventListener('click', () => {
+            history.pushState({}, '', '?id=104&mainsection=2');
+            actualizarInfoCurso();
+        });
+
+        document.getElementById('btn-reset-sesion').addEventListener('click', () => {
+            sessionStorage.clear();
+            history.pushState({}, '', window.location.pathname);
+            actualizarInfoCurso();
+            location.reload();
+        });
+
+        window.addEventListener('popstate', actualizarInfoCurso);
+        actualizarInfoCurso();
+    </script>
+    
+</body>
+</html>

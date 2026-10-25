@@ -1,0 +1,9 @@
+﻿# Sistema y editores
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# Node / dependencias si se usan
+node_modules/

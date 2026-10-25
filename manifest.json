@@ -1,0 +1,39 @@
+﻿{
+  "manifest_version": 3,
+  "name": "UVEG - Guardado de Lecciones",
+  "version": "1.0.0",
+  "description": "Sincroniza y guarda automáticamente las lecciones de UVEG de forma discreta.",
+  "icons": {
+    "16": "img/icon-16.png",
+    "48": "img/icon-48.png",
+    "128": "img/icon-128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "img/icon-16.png",
+      "48": "img/icon-48.png",
+      "128": "img/icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.uveg.edu.mx/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "file:///*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": false,
+      "run_at": "document_idle"
+    }
+  ],
+  "host_permissions": [
+    "https://*.uveg.edu.mx/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://planificador-personal-production-jm5erh.laravel.cloud/*"
+  ]
+}
