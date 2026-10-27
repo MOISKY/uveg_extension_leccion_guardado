@@ -53,6 +53,9 @@
             if (matchIdGenially) {
                 return `https://view.genial.ly/${matchIdGenially[1].toLowerCase()}`;
             }
+            if (u.searchParams && u.searchParams.has('id')) {
+                return `${u.protocol}//${h}${p}?id=${u.searchParams.get('id')}`.toLowerCase();
+            }
             return `${u.protocol}//${h}${p}`.toLowerCase();
         } catch {
             return urlStr.trim().toLowerCase().replace(/\/+$/, '');
@@ -88,13 +91,17 @@
         try {
             const url = new URL(urlStr, window.location.href);
             const h = url.hostname.toLowerCase();
+            const p = url.pathname.toLowerCase();
             const esGenially = HOSTS_GENIALLY.some(base => h === base || h.endsWith('.' + base));
             if (esGenially) return true;
-            if (h.endsWith('uveg.edu.mx') && /[?&]mainsection=[234]($|&)/i.test(url.search)) {
-                return true;
+            if (h.endsWith('uveg.edu.mx')) {
+                if (/[?&]mainsection=[234]($|&)/i.test(url.search)) return true;
+                if (p.includes('/mod/scorm/') || p.includes('/mod_scorm/')) return true;
+                if (p.includes('/mod_resource/') || p.includes('/mod/resource/') || p.endsWith('.pdf')) return true;
             }
         } catch {
             if (/view\.genial\.ly|view\.genially\.com/i.test(urlStr)) return true;
+            if (/mod\/scorm|mod_scorm|mod_resource|\.pdf/i.test(urlStr)) return true;
             if (/uveg\.edu\.mx.*[?&]mainsection=[234]/i.test(urlStr)) return true;
         }
         return false;
@@ -139,10 +146,48 @@
         return SIN_TITULO;
     }
 
-    function encontrarIframesEnDocumento(doc = document) {
+    function extraerTituloElemento(el, contextDoc = document) {
+        if (el.tagName === 'IFRAME') {
+            return extraerTitulo(el, contextDoc);
+        }
+
+        try {
+            const contenedor = el.closest ? el.closest('.container-lesson, .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null;
+            if (contenedor) {
+                const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
+                if (tituloUveg) {
+                    const txt = (tituloUveg.innerText || tituloUveg.textContent || '').trim();
+                    if (txt.length > 2) return txt.replace(/\s+/g, ' ');
+                }
+
+                const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
+                if (header) {
+                    const copia = header.cloneNode(true);
+                    copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
+                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].trim();
+                    if (txt.length > 2) return txt.replace(/\s+/g, ' ');
+                }
+            }
+
+            const titleAttr = (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim();
+            if (titleAttr && !/^(genially|view|iframe|embedded|icono|imagen|recurso)$/i.test(titleAttr)) {
+                return titleAttr.replace(/\s+/g, ' ');
+            }
+
+            const inner = (el.innerText || el.textContent || '').trim();
+            if (inner && inner.length > 2 && inner.length < 200) {
+                return inner.replace(/\s+/g, ' ');
+            }
+        } catch {}
+
+        return SIN_TITULO;
+    }
+
+    function encontrarLeccionesEnDocumento(doc = document) {
         const vistos = new Set();
         const encontrados = [];
 
+        // 1. Rastreo de Iframes (Genially y embebidos directos)
         for (const iframe of doc.querySelectorAll('iframe')) {
             const src = iframe.getAttribute('src') || iframe.getAttribute('data-src') || iframe.src;
             if (!src || !esUrlRecurso(src)) continue;
@@ -158,7 +203,48 @@
             });
         }
 
+        // 2. Rastreo de Elementos con data-link, enlaces SCORM y PDFs/recursos
+        const selectores = [
+            '[data-link]',
+            'a[href*="/mod/scorm/"]',
+            'a[href*="/mod_scorm/"]',
+            'a[href*="/mod/resource/"]',
+            'a[href*="/mod_resource/"]',
+            'a[href*=".pdf"]',
+            '.container-lesson',
+            '.img-leccion'
+        ].join(', ');
+
+        for (const el of doc.querySelectorAll(selectores)) {
+            let rawUrl = el.getAttribute('data-link') ||
+                         el.getAttribute('href');
+
+            if (!rawUrl && el.querySelector) {
+                const hijo = el.querySelector('[data-link], a[href*="mod/scorm"], a[href*=".pdf"]');
+                if (hijo) {
+                    rawUrl = hijo.getAttribute('data-link') || hijo.getAttribute('href');
+                }
+            }
+
+            if (!rawUrl || !esUrlRecurso(rawUrl)) continue;
+
+            const urlNorm = normalizarUrl(rawUrl);
+            if (vistos.has(urlNorm)) continue;
+            vistos.add(urlNorm);
+
+            const titulo = extraerTituloElemento(el, doc);
+            encontrados.push({
+                titulo: titulo,
+                url: rawUrl
+            });
+        }
+
         return encontrados;
+    }
+
+    // Alias retrocompatible
+    function encontrarIframesEnDocumento(doc = document) {
+        return encontrarLeccionesEnDocumento(doc);
     }
 
     // Escaneo de secciones 2, 3, 4 en el campus virtual UVEG
