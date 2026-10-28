@@ -78,3 +78,12 @@ Al entrar a la página principal de un curso en UVEG (por ejemplo, `https://aval
 3. Haz clic en **Cargar descomprimida** y selecciona:
    `C:\xampp\htdocs\uveg_extension_leccion_guardado`
 4. Si realizas cambios en `content.js`, haz clic en el botón **Recargar (`⟳`)** de la tarjeta de la extensión y actualiza la página del curso en UVEG.
+
+---
+
+## 5. Nota de Desarrollo Pendiente (Roadmap)
+
+> [!NOTE]
+> **Escenario pendiente a desarrollo: Detector de Videos / YouTube en Iframes**
+> - Actualmente la extensión detecta y procesa `iframes` de Genially (`view.genially.com` / `genial.ly`), paquetes SCORM (`mod_scorm`) y documentos PDF (`mod_resource` / `.pdf`).
+> - **Pendiente a desarrollo:** Implementar el escenario de detección y sincronización para `iframes` o contenedores que incrusten **videos o reproductores de YouTube** (`youtube.com/embed/...`, `youtu.be`, `vimeo.com`, o reproductores de video embebidos) dentro de las lecciones.
