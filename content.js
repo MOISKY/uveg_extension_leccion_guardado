@@ -42,7 +42,10 @@
     const ID_HOST = 'uveg-guardado-notif-host';
     const SIN_TITULO = '(sin título)';
     const REGEX_CODIGO_LECCION = /(?:LEC[_-]?L|[A-Z0-9]+_L|_L|L[_-]|LECCION[_-]?\s*|\bL)[_-]?0*(\d+)(?!\d)/i;
+    const REGEX_NUMERO_PLECCION = /lecci[oó]n\s*0*(\d+)(?!\d)/i;
     const STORAGE_KEY_MODULO = 'uveg_ultimo_modulo_id';
+    const STORAGE_KEY_MODULO_NOMBRE = 'uveg_ultimo_modulo_nombre';
+    const STORAGE_KEY_MAPA_LECCIONES = 'uveg_mapa_pleccion_';
 
     let sincronizando = false;
     let yaProcesado = false;
@@ -92,6 +95,8 @@
 
     function extraerNumeroLeccion(texto) {
         if (!texto) return null;
+        const mPLec = String(texto).match(REGEX_NUMERO_PLECCION);
+        if (mPLec) return parseInt(mPLec[1], 10);
         const m = String(texto).match(REGEX_CODIGO_LECCION);
         return m ? parseInt(m[1], 10) : null;
     }
@@ -153,7 +158,7 @@
                   .toLowerCase();
     }
 
-    // --- IDENTIFICACIÓN DEL MÓDULO ---
+    // --- IDENTIFICACIÓN DEL MÓDULO (IdModuloUveg + Nombre H1) ---
 
     function obtenerIdModulo() {
         const params = new URLSearchParams(window.location.search);
@@ -171,6 +176,24 @@
             if (guardado && guardado.trim()) return guardado.trim();
         } catch {}
         return '324';
+    }
+
+    function obtenerNombreModuloH1(doc = document, idModuloFallback = '') {
+        try {
+            const h1 = doc.querySelector('h1');
+            if (h1) {
+                const txt = (h1.innerText || h1.textContent || '').replace(/\s+/g, ' ').trim();
+                if (txt.length > 1 && !/^(campus virtual|uveg)$/i.test(txt)) {
+                    try { localStorage.setItem(STORAGE_KEY_MODULO_NOMBRE, txt); } catch {}
+                    return txt;
+                }
+            }
+        } catch {}
+        try {
+            const guardado = localStorage.getItem(STORAGE_KEY_MODULO_NOMBRE);
+            if (guardado && guardado.trim()) return guardado.trim();
+        } catch {}
+        return idModuloFallback || obtenerIdModulo();
     }
 
     function esUrlGenially(urlStr) {
@@ -215,7 +238,95 @@
                esUrlPdfDirecto(urlStr);
     }
 
-    // --- EXTRACCIÓN DE TÍTULOS Y CÓDIGOS (%L%, LEC_L1, CPFI_L4, L3_Comic.pdf) ---
+    // --- EXTRACCIÓN DE TÍTULOS (<p class="leccion2-pLeccion">) Y CÓDIGOS (LEC_L1, CPFI_L4, L3_Comic) ---
+
+    function cargarMapaPLeccion(idModulo) {
+        const clave = STORAGE_KEY_MAPA_LECCIONES + (idModulo || obtenerIdModulo());
+        try {
+            const raw = localStorage.getItem(clave);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') return parsed;
+            }
+        } catch {}
+        return {};
+    }
+
+    function guardarMapaPLeccion(idModulo, mapa) {
+        if (!mapa || typeof mapa !== 'object') return;
+        const clave = STORAGE_KEY_MAPA_LECCIONES + (idModulo || obtenerIdModulo());
+        try {
+            const actual = cargarMapaPLeccion(idModulo);
+            const combinado = { ...actual, ...mapa };
+            localStorage.setItem(clave, JSON.stringify(combinado));
+        } catch {}
+    }
+
+    function extraerMapaPLeccionDeDocumento(doc = document, idModulo = '') {
+        const mapa = cargarMapaPLeccion(idModulo);
+        if (!doc || !doc.querySelectorAll) return mapa;
+
+        try {
+            const parrafos = doc.querySelectorAll('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+            for (const p of parrafos) {
+                const txt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!txt || txt.length < 3) continue;
+
+                let num = extraerNumeroLeccion(txt);
+                if (num === null) {
+                    const idAnc = extraerIdContenedorLeccion(p);
+                    num = extraerNumeroLeccion(idAnc);
+                }
+                if (num !== null && num !== 999) {
+                    mapa[String(num)] = txt;
+                }
+            }
+            guardarMapaPLeccion(idModulo, mapa);
+        } catch {}
+
+        return mapa;
+    }
+
+    function obtenerNombrePLeccion(el, doc, contenedorExplicito, numLeccion, codigoFallback, mapaPLeccion = {}) {
+        try {
+            const contenedor = contenedorExplicito || (el && el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null);
+            if (contenedor && contenedor.querySelectorAll) {
+                const pList = contenedor.querySelectorAll('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+                if (pList.length === 1) {
+                    const txt = (pList[0].innerText || pList[0].textContent || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length > 2) return txt;
+                } else if (pList.length > 1 && numLeccion !== null && numLeccion !== 999) {
+                    for (const p of pList) {
+                        const txt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (extraerNumeroLeccion(txt) === numLeccion) return txt;
+                    }
+                }
+            }
+
+            if (numLeccion !== null && numLeccion !== 999) {
+                if (mapaPLeccion && mapaPLeccion[String(numLeccion)]) {
+                    return mapaPLeccion[String(numLeccion)];
+                }
+                const guardado = cargarMapaPLeccion(obtenerIdModulo());
+                if (guardado[String(numLeccion)]) {
+                    return guardado[String(numLeccion)];
+                }
+            }
+
+            if (el && el.closest) {
+                const sec = el.closest('.activity, .activityinstance, .contentitem, .section, .box, li, div');
+                if (sec && sec.querySelector) {
+                    const pCercano = sec.querySelector('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+                    if (pCercano) {
+                        const txt = (pCercano.innerText || pCercano.textContent || '').replace(/\s+/g, ' ').trim();
+                        if (txt.length > 2) return txt;
+                    }
+                }
+            }
+        } catch {}
+
+        return codigoFallback || SIN_TITULO;
+    }
 
     function extraerIdContenedorLeccion(el) {
         if (!el) return '';
@@ -263,7 +374,7 @@
         return SIN_TITULO;
     }
 
-    function extraerTituloElemento(el, contextDoc = document, contenedorExplicito = null, rawUrl = '') {
+    function extraerCodigoElemento(el, contextDoc = document, contenedorExplicito = null, rawUrl = '') {
         if (!el) return SIN_TITULO;
         if (el.tagName === 'IFRAME') {
             return extraerTitulo(el, contextDoc);
@@ -271,6 +382,27 @@
 
         try {
             const contenedor = contenedorExplicito || (el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"], .activity, .activityinstance, .contentitem, .section, .box, [id^="module-"]') : null);
+
+            if (contenedor) {
+                // Si el contenedor tiene un ID de lección tipo id="LEC_L1", usarlo directamente como código
+                const idCont = (contenedor.getAttribute && contenedor.getAttribute('id')) || contenedor.id || '';
+                if (idCont && REGEX_CODIGO_LECCION.test(idCont) && !/^module-/i.test(idCont)) {
+                    return idCont.trim();
+                }
+            }
+
+            const idAncestro = extraerIdContenedorLeccion(el);
+            if (idAncestro) {
+                return idAncestro;
+            }
+
+            // Si la URL apunta directamente a un PDF (ej. L3_Comic.pdf), extraer el código desde el archivo
+            if (rawUrl && esUrlPdfDirecto(rawUrl)) {
+                const nomPdf = extraerNombreArchivoPdf(rawUrl);
+                if (nomPdf) {
+                    return nomPdf.replace(/\.pdf$/i, '').trim();
+                }
+            }
 
             if (contenedor) {
                 const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
@@ -281,12 +413,6 @@
                     }
                 }
 
-                // Si el contenedor tiene un ID de lección tipo id="LEC_L1", usarlo directamente
-                const idCont = (contenedor.getAttribute && contenedor.getAttribute('id')) || contenedor.id || '';
-                if (idCont && REGEX_CODIGO_LECCION.test(idCont) && !/^module-/i.test(idCont)) {
-                    return idCont.trim();
-                }
-
                 const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
                 if (header) {
                     const copia = header.cloneNode(true);
@@ -295,19 +421,6 @@
                     if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
                         return txt;
                     }
-                }
-            }
-
-            const idAncestro = extraerIdContenedorLeccion(el);
-            if (idAncestro) {
-                return idAncestro;
-            }
-
-            // Si la URL apunta directamente a un PDF (ej. L3_Comic.pdf), extraer el nombre desde el archivo
-            if (rawUrl && esUrlPdfDirecto(rawUrl)) {
-                const nomPdf = extraerNombreArchivoPdf(rawUrl);
-                if (nomPdf) {
-                    return nomPdf.replace(/\.pdf$/i, '').trim();
                 }
             }
 
@@ -384,14 +497,25 @@
         const encontrados = [];
         const contenedoresConGenially = new Set();
         const numerosConGenially = new Set();
+        const idModuloActual = obtenerIdModulo();
+
+        if (doc === document) {
+            obtenerNombreModuloH1(doc, idModuloActual);
+        }
+        const mapaPLeccion = extraerMapaPLeccionDeDocumento(doc, idModuloActual);
 
         // 0. Si el navegador dio un salto directo a un archivo PDF de UVEG (ej. .../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf)
         if (doc === document && esUrlPdfDirecto(window.location.href)) {
             const nombrePdf = extraerNombreArchivoPdf(window.location.href) || 'Documento.pdf';
-            const tituloPdf = nombrePdf.replace(/\.pdf$/i, '').trim() || 'Documento_PDF';
-            const numPdf = extraerNumeroLeccion(tituloPdf);
+            const codigoPdf = nombrePdf.replace(/\.pdf$/i, '').trim() || 'Documento_PDF';
+            const numPdf = extraerNumeroLeccion(codigoPdf);
+            const nombreVisual = (numPdf !== null && mapaPLeccion[String(numPdf)])
+                ? mapaPLeccion[String(numPdf)]
+                : codigoPdf;
             return [{
-                titulo: tituloPdf,
+                codigo: codigoPdf,
+                nombre: nombreVisual,
+                titulo: codigoPdf,
                 url: window.location.href,
                 numero: numPdf !== null ? numPdf : 999,
                 esPdf: true
@@ -406,29 +530,34 @@
             let src = rawSrc;
             try { src = new URL(rawSrc, window.location.href).href; } catch {}
 
-            const titulo = extraerTitulo(iframe, doc);
-            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+            const codigo = extraerTitulo(iframe, doc);
+            if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const urlNorm = normalizarUrl(src);
             if (vistos.has(urlNorm)) continue;
             vistos.add(urlNorm);
 
+            let numCont = null;
             const contPadre = iframe.closest ? iframe.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null;
             if (contPadre) {
                 contenedoresConGenially.add(contPadre);
-                const numCont = extraerNumeroLeccion(contPadre.id);
+                numCont = extraerNumeroLeccion(contPadre.id);
                 if (numCont !== null) numerosConGenially.add(numCont);
             }
 
-            const numTitulo = extraerNumeroLeccion(titulo);
-            if (numTitulo !== null) {
-                numerosConGenially.add(numTitulo);
+            const numCodigo = extraerNumeroLeccion(codigo) ?? numCont;
+            if (numCodigo !== null) {
+                numerosConGenially.add(numCodigo);
             }
 
+            const nombreVisual = obtenerNombrePLeccion(iframe, doc, contPadre, numCodigo, codigo, mapaPLeccion);
+
             encontrados.push({
-                titulo: titulo,
+                codigo: codigo,
+                nombre: nombreVisual,
+                titulo: codigo,
                 url: src,
-                numero: numTitulo !== null ? numTitulo : 999
+                numero: numCodigo !== null ? numCodigo : 999
             });
         }
 
@@ -451,17 +580,21 @@
             let rawUrl = infoEl.rawAttr;
             try { rawUrl = new URL(infoEl.rawAttr, window.location.href).href; } catch {}
 
-            const titulo = extraerTituloElemento(infoEl.el, doc, cont, rawUrl);
-            if (!titulo || titulo === SIN_TITULO) continue;
-            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+            const codigo = extraerCodigoElemento(infoEl.el, doc, cont, rawUrl);
+            if (!codigo || codigo === SIN_TITULO) continue;
+            if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const urlNorm = normalizarUrl(rawUrl);
             if (vistos.has(urlNorm)) continue;
             vistos.add(urlNorm);
 
-            const num = numLeccion !== null ? numLeccion : (extraerNumeroLeccion(titulo) ?? 999);
+            const num = numLeccion !== null ? numLeccion : (extraerNumeroLeccion(codigo) ?? 999);
+            const nombreVisual = obtenerNombrePLeccion(infoEl.el, doc, cont, num, codigo, mapaPLeccion);
+
             encontrados.push({
-                titulo: titulo,
+                codigo: codigo,
+                nombre: nombreVisual,
+                titulo: codigo,
                 url: rawUrl,
                 numero: num,
                 esPdf: esUrlPdfDirecto(rawUrl)
@@ -494,8 +627,8 @@
             const urlNorm = normalizarUrl(rawUrl);
             if (vistos.has(urlNorm)) continue;
 
-            let titulo = extraerTituloElemento(el, doc, padreCont, rawUrl);
-            if (/^(english|español|saltar|salir)/i.test(titulo.trim())) continue;
+            let codigo = extraerCodigoElemento(el, doc, padreCont, rawUrl);
+            if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const esPdfDirecto = esUrlPdfDirecto(rawUrl);
             const esModRes = /\/mod\/resource\/|\/mod_resource\//i.test(rawUrl);
@@ -504,19 +637,23 @@
             if (!padreCont) {
                 if (esPdfDirecto) {
                     const nomPdf = extraerNombreArchivoPdf(rawUrl) || '';
-                    if (!REGEX_CODIGO_LECCION.test(nomPdf) && !REGEX_CODIGO_LECCION.test(titulo)) {
+                    if (!REGEX_CODIGO_LECCION.test(nomPdf) && !REGEX_CODIGO_LECCION.test(codigo)) {
                         continue;
                     }
-                    if (!titulo || titulo === SIN_TITULO) {
-                        titulo = nomPdf.replace(/\.pdf$/i, '');
+                    if (!codigo || codigo === SIN_TITULO || !REGEX_CODIGO_LECCION.test(codigo)) {
+                        codigo = nomPdf.replace(/\.pdf$/i, '');
                     }
                 } else if (esModRes) {
                     // Se validará al dar el salto HTTP si redirige a un PDF de lección (como L3_Comic.pdf)
+                    const numRes = extraerNumeroLeccion(codigo) ?? 999;
+                    const nombreRes = obtenerNombrePLeccion(el, doc, padreCont, numRes, codigo, mapaPLeccion);
                     vistos.add(urlNorm);
                     encontrados.push({
-                        titulo: titulo,
+                        codigo: codigo,
+                        nombre: nombreRes,
+                        titulo: codigo,
                         url: rawUrl,
-                        numero: extraerNumeroLeccion(titulo) ?? 999,
+                        numero: numRes,
                         esPdf: true,
                         requiereValidarSaltoPdf: true
                     });
@@ -526,14 +663,18 @@
                 }
             }
 
-            if (!titulo || titulo === SIN_TITULO) continue;
+            if (!codigo || codigo === SIN_TITULO) continue;
 
-            const num = extraerNumeroLeccion(titulo);
+            const num = extraerNumeroLeccion(codigo);
             if (num !== null && numerosConGenially.has(num) && !esPdfDirecto && !esModRes) continue;
+
+            const nombreVisual = obtenerNombrePLeccion(el, doc, padreCont, num, codigo, mapaPLeccion);
 
             vistos.add(urlNorm);
             encontrados.push({
-                titulo: titulo,
+                codigo: codigo,
+                nombre: nombreVisual,
+                titulo: codigo,
                 url: rawUrl,
                 numero: num !== null ? num : 999,
                 esPdf: esPdfDirecto || esModRes
@@ -1060,9 +1201,9 @@
 
     // --- COMUNICACIÓN CON LA API CLOUD (LARAVEL) ---
 
-    async function buscarModulo(idModulo) {
-        const idStr = String(idModulo).trim();
-        const url = `${API_BASE_URL}/modulos?Nombre=${encodeURIComponent(idStr)}`;
+    async function buscarModulo(idModuloUveg) {
+        const idStr = String(idModuloUveg).trim();
+        const url = `${API_BASE_URL}/modulos?IdModuloUveg=${encodeURIComponent(idStr)}`;
         const resp = await fetch(url, {
             method: 'GET',
             headers: { 'Accept': 'application/json' }
@@ -1072,14 +1213,18 @@
 
         const data = await resp.json();
         if (Array.isArray(data) && data.length > 0) {
-            const encontrado = data.find(m => String(m.Modulo).trim() === idStr);
+            const encontrado = data.find(m =>
+                String(m.IdModuloUveg || '').trim() === idStr ||
+                String(m.Modulo || '').trim() === idStr
+            );
             if (encontrado) return encontrado;
         }
         return null;
     }
 
-    async function crearModulo(idModulo) {
-        const idStr = String(idModulo).trim();
+    async function crearModulo(idModuloUveg, nombreVisual) {
+        const idStr = String(idModuloUveg).trim();
+        const nomStr = (nombreVisual || idStr).trim();
         const url = `${API_BASE_URL}/modulos`;
         const resp = await fetch(url, {
             method: 'POST',
@@ -1087,13 +1232,38 @@
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
             },
-            body: JSON.stringify({ Modulo: idStr })
+            body: JSON.stringify({
+                IdModuloUveg: idStr,
+                Modulo: nomStr
+            })
         });
 
         if (!resp.ok) throw new Error(`HTTP ${resp.status} al registrar módulo.`);
 
         const res = await resp.json();
         return res.data || res;
+    }
+
+    async function actualizarModulo(idModuloDb, idModuloUveg, nombreVisual) {
+        if (!idModuloDb) return null;
+        try {
+            const resp = await fetch(`${API_BASE_URL}/modulos/${encodeURIComponent(idModuloDb)}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({
+                    IdModuloUveg: String(idModuloUveg).trim(),
+                    Modulo: (nombreVisual || idModuloUveg).trim()
+                })
+            });
+            if (resp.ok) {
+                const res = await resp.json();
+                return res.data || res;
+            }
+        } catch {}
+        return null;
     }
 
     async function obtenerLeccionesDeModulo(idModulo) {
@@ -1109,7 +1279,7 @@
         return Array.isArray(data) ? data : [];
     }
 
-    async function crearLeccion(idModulo, nombre, urlLeccion) {
+    async function crearLeccion(idModulo, codigo, nombre, urlLeccion) {
         const url = `${API_BASE_URL}/lecciones`;
         const resp = await fetch(url, {
             method: 'POST',
@@ -1119,14 +1289,35 @@
             },
             body: JSON.stringify({
                 IdModulo: idModulo,
-                Nombre: nombre || SIN_TITULO,
+                Codigo: codigo || SIN_TITULO,
+                Nombre: nombre || codigo || SIN_TITULO,
                 UrlLeccion: urlLeccion
             })
         });
 
-        if (!resp.ok) throw new Error(`HTTP ${resp.status} al guardar lección "${nombre}".`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} al guardar lección "${codigo}".`);
 
         return await resp.json();
+    }
+
+    async function actualizarLeccion(idLeccion, codigo, nombre, urlLeccion) {
+        if (!idLeccion) return null;
+        try {
+            const resp = await fetch(`${API_BASE_URL}/lecciones/${encodeURIComponent(idLeccion)}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({
+                    Codigo: codigo || SIN_TITULO,
+                    Nombre: nombre || codigo || SIN_TITULO,
+                    UrlLeccion: urlLeccion
+                })
+            });
+            if (resp.ok) return await resp.json();
+        } catch {}
+        return null;
     }
 
     async function eliminarLeccion(idLeccion) {
@@ -1265,23 +1456,27 @@
 
     // --- PROCESO PRINCIPAL DE GUARDADO Y PRESERVACIÓN ---
 
-    function yaExisteEnLista(existentes, titulo, urlCandidata) {
+    function buscarExistentePorCodigoOUrl(existentes, codigo, urlCandidata) {
         const itemUrlNorm = normalizarUrl(urlCandidata);
-        const itemNomNorm = normalizarTexto(titulo);
-        const itemSlug = crearSlug(titulo);
+        const itemCodNorm = normalizarTexto(codigo);
+        const itemSlug = crearSlug(codigo);
         const nomPdf = extraerNombreArchivoPdf(urlCandidata);
 
-        return existentes.some(ex => {
+        return existentes.find(ex => {
             const exUrl = ex.UrlLeccion || '';
             const exUrlNorm = normalizarUrl(exUrl);
-            const exNomNorm = normalizarTexto(ex.Nombre);
+            const exCodNorm = normalizarTexto(ex.Codigo || ex.Nombre);
 
             if (itemUrlNorm && exUrlNorm && itemUrlNorm === exUrlNorm) return true;
-            if (itemNomNorm && exNomNorm && itemNomNorm === exNomNorm && itemNomNorm !== normalizarTexto(SIN_TITULO)) return true;
+            if (itemCodNorm && exCodNorm && itemCodNorm === exCodNorm && itemCodNorm !== normalizarTexto(SIN_TITULO)) return true;
             if (itemSlug && itemSlug !== crearSlug(SIN_TITULO) && exUrl.toLowerCase().includes(`/${itemSlug}/`)) return true;
             if (nomPdf && exUrl.toLowerCase().endsWith('/' + nomPdf.toLowerCase())) return true;
             return false;
-        });
+        }) || null;
+    }
+
+    function yaExisteEnLista(existentes, codigo, urlCandidata) {
+        return Boolean(buscarExistentePorCodigoOUrl(existentes, codigo, urlCandidata));
     }
 
     async function ejecutarSincronizacion() {
@@ -1290,6 +1485,8 @@
 
         try {
             const enPaginaPdfDirecta = esUrlPdfDirecto(window.location.href);
+            const idModulo = obtenerIdModulo();
+            const nombreModuloH1 = obtenerNombreModuloH1(document, idModulo);
 
             // 1. Escaneo local de lecciones en la página
             const locales = encontrarIframesEnDocumento(document);
@@ -1305,7 +1502,6 @@
             }
 
             // 2. Si estamos en la vista del curso en UVEG (y no en un PDF abierto directamente), escanear secciones 2, 3 y 4
-            const idModulo = obtenerIdModulo();
             if (!enPaginaPdfDirecta && idModulo && hostname.endsWith('uveg.edu.mx')) {
                 await escanearTodasLasSecciones(idModulo);
             }
@@ -1313,6 +1509,8 @@
             if (itemsAcumulados.length === 0) {
                 return;
             }
+
+            const mapaGlobalPLeccion = cargarMapaPLeccion(idModulo);
 
             // Deduplicar por URL y por clave de lección (sin que un PDF como L3_Comic colisione con el SCORM LEC_L3)
             const porClave = new Map();
@@ -1324,15 +1522,28 @@
                 if (urlsUnicasVistas.has(norm)) continue;
                 urlsUnicasVistas.add(norm);
 
-                const num = it.numero ?? extraerNumeroLeccion(it.titulo);
+                const cod = it.codigo || it.titulo || SIN_TITULO;
+                const num = it.numero ?? extraerNumeroLeccion(cod);
+                const nomVisual = (num !== null && num !== 999 && mapaGlobalPLeccion[String(num)])
+                    ? mapaGlobalPLeccion[String(num)]
+                    : (it.nombre || cod);
+
+                const itemEnriquecido = {
+                    ...it,
+                    codigo: cod,
+                    nombre: nomVisual,
+                    titulo: cod,
+                    numero: num !== null ? num : 999
+                };
+
                 if (num !== null && num !== 999) {
-                    const clave = it.esPdf ? `${num}_pdf_${crearSlug(it.titulo || it.url)}` : `${num}_main`;
+                    const clave = it.esPdf ? `${num}_pdf_${crearSlug(cod || it.url)}` : `${num}_main`;
                     const existente = porClave.get(clave);
                     if (!existente || (esUrlGenially(it.url) && !esUrlGenially(existente.url))) {
-                        porClave.set(clave, { ...it, numero: num });
+                        porClave.set(clave, itemEnriquecido);
                     }
                 } else {
-                    sinNumero.push({ ...it, numero: 999 });
+                    sinNumero.push(itemEnriquecido);
                 }
             }
 
@@ -1341,14 +1552,19 @@
                 ...sinNumero
             ];
 
-            // 3. Consultar módulo en la API
+            // 3. Consultar módulo en la API por IdModuloUveg
             let modulo = await buscarModulo(idModulo);
             let idModuloDb = null;
 
             if (modulo) {
                 idModuloDb = modulo.id || modulo.IdModulo;
+                const nomActual = String(modulo.Modulo || '').trim();
+                const uvegActual = String(modulo.IdModuloUveg || '').trim();
+                if (uvegActual !== String(idModulo).trim() || (nombreModuloH1 && nombreModuloH1 !== idModulo && nomActual !== nombreModuloH1)) {
+                    await actualizarModulo(idModuloDb, idModulo, nombreModuloH1);
+                }
             } else {
-                const nuevoModulo = await crearModulo(idModulo);
+                const nuevoModulo = await crearModulo(idModulo, nombreModuloH1);
                 idModuloDb = nuevoModulo.id || nuevoModulo.IdModulo;
             }
 
@@ -1363,19 +1579,35 @@
             for (const ex of existentesRaw) {
                 const urlEx = (ex.UrlLeccion || '').toLowerCase();
                 const nomEx = (ex.Nombre || '').trim();
-                if (!urlEx.includes('supabase.co') && (urlEx.includes('/mod/resource/') || /^(tiempo estimado)/i.test(nomEx))) {
+                const codEx = (ex.Codigo || '').trim();
+                if (!urlEx.includes('supabase.co') && (urlEx.includes('/mod/resource/') || /^(tiempo estimado)/i.test(nomEx) || /^(tiempo estimado)/i.test(codEx))) {
                     await eliminarLeccion(ex.id || ex.IdLeccion);
                     continue;
                 }
                 existentes.push(ex);
             }
 
-            // 5. Filtrar únicamente las lecciones que aún no están registradas en la base de datos
+            // 5. Filtrar las lecciones que aún no están registradas y actualizar metadatos (Codigo / Nombre de .leccion2-pLeccion) si ya existen
             const pendientes = [];
 
             for (const item of itemsUnicos) {
-                if (!item.requiereValidarSaltoPdf && yaExisteEnLista(existentes, item.titulo, item.url)) {
-                    continue;
+                if (!item.requiereValidarSaltoPdf) {
+                    const regExistente = buscarExistentePorCodigoOUrl(existentes, item.codigo, item.url);
+                    if (regExistente) {
+                        const codReg = String(regExistente.Codigo || '').trim();
+                        const nomReg = String(regExistente.Nombre || '').trim();
+                        if ((item.codigo && codReg !== item.codigo) || (item.nombre && item.nombre !== item.codigo && nomReg !== item.nombre)) {
+                            await actualizarLeccion(
+                                regExistente.id || regExistente.IdLeccion,
+                                item.codigo,
+                                item.nombre,
+                                regExistente.UrlLeccion
+                            );
+                            regExistente.Codigo = item.codigo;
+                            regExistente.Nombre = item.nombre;
+                        }
+                        continue;
+                    }
                 }
                 pendientes.push(item);
             }
@@ -1395,7 +1627,8 @@
             for (let i = 0; i < total; i++) {
                 const item = pendientes[i];
                 let urlFinal = item.url;
-                let tituloFinal = item.titulo;
+                let codigoFinal = item.codigo || item.titulo;
+                let nombreFinal = item.nombre || codigoFinal;
 
                 if (esRecursoScorm(item.url)) {
                     // Si es un mod/resource suelto fuera de .container-lesson, verificar primero a dónde salta
@@ -1407,17 +1640,34 @@
                             const nomPdf = extraerNombreArchivoPdf(destino.url) || '';
                             if (!REGEX_CODIGO_LECCION.test(nomPdf)) continue;
 
-                            const tituloPdf = nomPdf.replace(/\.pdf$/i, '').trim();
-                            if (yaExisteEnLista(existentes, tituloPdf, destino.url)) continue;
+                            const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                            const numPdf = extraerNumeroLeccion(codigoPdf);
+                            const nombreVisualPdf = (numPdf !== null && mapaGlobalPLeccion[String(numPdf)])
+                                ? mapaGlobalPLeccion[String(numPdf)]
+                                : (item.nombre && item.nombre !== item.codigo ? item.nombre : codigoPdf);
+
+                            const regPdfExistente = buscarExistentePorCodigoOUrl(existentes, codigoPdf, destino.url);
+                            if (regPdfExistente) {
+                                if (regPdfExistente.Codigo !== codigoPdf || regPdfExistente.Nombre !== nombreVisualPdf) {
+                                    await actualizarLeccion(
+                                        regPdfExistente.id || regPdfExistente.IdLeccion,
+                                        codigoPdf,
+                                        nombreVisualPdf,
+                                        regPdfExistente.UrlLeccion
+                                    );
+                                }
+                                continue;
+                            }
 
                             mostrarToast({
                                 tipo: 'info',
-                                mensaje: `Preservando PDF en Supabase: ${tituloPdf}...`,
+                                mensaje: `Preservando PDF en Supabase: ${codigoPdf}...`,
                                 duracionMs: 0
                             });
 
-                            const resPdf = await preservarPdfEnSupabase(idModulo, tituloPdf, destino.url, destino.blob || null);
-                            tituloFinal = resPdf.tituloFinal;
+                            const resPdf = await preservarPdfEnSupabase(idModulo, codigoPdf, destino.url, destino.blob || null);
+                            codigoFinal = resPdf.tituloFinal || codigoPdf;
+                            nombreFinal = nombreVisualPdf;
                             urlFinal = resPdf.urlPublica;
                         } catch {
                             continue;
@@ -1425,25 +1675,29 @@
                     } else {
                         mostrarToast({
                             tipo: 'info',
-                            mensaje: `Preservando en Supabase (${i + 1}/${total}): ${item.titulo}...`,
+                            mensaje: `Preservando en Supabase (${i + 1}/${total}): ${codigoFinal}...`,
                             duracionMs: 0
                         });
 
                         try {
-                            const resPreservado = await preservarScormEnSupabase(idModulo, item.titulo, item.url, pdfsExtraDescubiertos);
-                            tituloFinal = resPreservado.tituloFinal || item.titulo;
+                            const resPreservado = await preservarScormEnSupabase(idModulo, codigoFinal, item.url, pdfsExtraDescubiertos);
+                            codigoFinal = resPreservado.tituloFinal || codigoFinal;
+                            const numRes = extraerNumeroLeccion(codigoFinal) ?? item.numero;
+                            if (numRes !== null && numRes !== 999 && mapaGlobalPLeccion[String(numRes)]) {
+                                nombreFinal = mapaGlobalPLeccion[String(numRes)];
+                            }
                             urlFinal = resPreservado.urlPublica;
                         } catch (e) {
-                            console.error(`[UVEG Guardado] Error al subir "${item.titulo}" a Supabase:`, e);
-                            erroresScorm.push(`${item.titulo}: ${e.message}`);
+                            console.error(`[UVEG Guardado] Error al subir "${codigoFinal}" a Supabase:`, e);
+                            erroresScorm.push(`${codigoFinal}: ${e.message}`);
                             continue;
                         }
                     }
                 }
 
-                if (!yaExisteEnLista(existentes, tituloFinal, urlFinal)) {
-                    await crearLeccion(idModuloDb, tituloFinal, urlFinal);
-                    existentes.push({ Nombre: tituloFinal, UrlLeccion: urlFinal });
+                if (!yaExisteEnLista(existentes, codigoFinal, urlFinal)) {
+                    await crearLeccion(idModuloDb, codigoFinal, nombreFinal, urlFinal);
+                    existentes.push({ Codigo: codigoFinal, Nombre: nombreFinal, UrlLeccion: urlFinal });
                     exitosCount++;
                 }
             }
@@ -1451,23 +1705,40 @@
             // 7b. Si dentro de los archivos de un SCORM se detectaron saltos a PDFs de UVEG (como L3_Comic.pdf), preservarlos también
             for (const urlPdfExtra of pdfsExtraDescubiertos) {
                 const nomPdf = extraerNombreArchivoPdf(urlPdfExtra) || 'Documento.pdf';
-                const tituloPdf = nomPdf.replace(/\.pdf$/i, '').trim();
-                if (yaExisteEnLista(existentes, tituloPdf, urlPdfExtra)) continue;
+                const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                const numPdf = extraerNumeroLeccion(codigoPdf);
+                const nombreVisualPdf = (numPdf !== null && mapaGlobalPLeccion[String(numPdf)])
+                    ? mapaGlobalPLeccion[String(numPdf)]
+                    : codigoPdf;
+
+                const regPdfEx = buscarExistentePorCodigoOUrl(existentes, codigoPdf, urlPdfExtra);
+                if (regPdfEx) {
+                    if (regPdfEx.Codigo !== codigoPdf || regPdfEx.Nombre !== nombreVisualPdf) {
+                        await actualizarLeccion(
+                            regPdfEx.id || regPdfEx.IdLeccion,
+                            codigoPdf,
+                            nombreVisualPdf,
+                            regPdfEx.UrlLeccion
+                        );
+                    }
+                    continue;
+                }
 
                 try {
                     mostrarToast({
                         tipo: 'info',
-                        mensaje: `Preservando PDF en Supabase: ${tituloPdf}...`,
+                        mensaje: `Preservando PDF en Supabase: ${codigoPdf}...`,
                         duracionMs: 0
                     });
-                    const resPdf = await preservarPdfEnSupabase(idModulo, tituloPdf, urlPdfExtra, null);
-                    if (!yaExisteEnLista(existentes, resPdf.tituloFinal, resPdf.urlPublica)) {
-                        await crearLeccion(idModuloDb, resPdf.tituloFinal, resPdf.urlPublica);
-                        existentes.push({ Nombre: resPdf.tituloFinal, UrlLeccion: resPdf.urlPublica });
+                    const resPdf = await preservarPdfEnSupabase(idModulo, codigoPdf, urlPdfExtra, null);
+                    const codFinalPdf = resPdf.tituloFinal || codigoPdf;
+                    if (!yaExisteEnLista(existentes, codFinalPdf, resPdf.urlPublica)) {
+                        await crearLeccion(idModuloDb, codFinalPdf, nombreVisualPdf, resPdf.urlPublica);
+                        existentes.push({ Codigo: codFinalPdf, Nombre: nombreVisualPdf, UrlLeccion: resPdf.urlPublica });
                         exitosCount++;
                     }
                 } catch (e) {
-                    console.warn(`[UVEG Guardado] Error al preservar PDF interno "${tituloPdf}":`, e);
+                    console.warn(`[UVEG Guardado] Error al preservar PDF interno "${codigoPdf}":`, e);
                 }
             }
 
