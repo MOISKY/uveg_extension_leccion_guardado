@@ -1,73 +1,64 @@
-# UVEG - Extensión de Guardado Automático de Lecciones (v1.1.0 - Supabase SCORM + PDF + Genially)
+# UVEG - Extensión de Guardado Automático de Lecciones (v1.2.0 - `IdModuloUveg` + `Codigo` + `<p class="leccion2-pLeccion">` + Supabase SCORM/PDF/Genially)
 
 Extensión de Google Chrome / Edge (**Manifest V3**) para el **Campus Virtual UVEG**. Sincroniza, preserva en **Supabase Storage** (tanto paquetes interactivos **SCORM** como documentos **PDF** tipo `L3_Comic.pdf`) y almacena de forma **automática, silenciosa y desde la vista general del curso ("por arriba")** todas las lecciones del módulo en el sistema **Planificador Personal**.
 
 ---
 
-## 1. Resumen de Funcionamiento Actual
+## 1. Arquitectura de Datos Actual (`planificador_personal` + Extensión)
 
-Al entrar a la página principal de un curso en UVEG (por ejemplo, `https://avalicmod19d.uveg.edu.mx/course/view.php?id=324`) o al abrir un enlace que salte a un PDF de lección (`.../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf`), la extensión ejecuta automáticamente el siguiente flujo:
+### A) Tabla `contabilidad_modulo`
+| Campo | Propósito en el Sistema | Origen en la Extensión UVEG | Comportamiento en UI (`planificador_personal`) |
+| :--- | :--- | :--- | :--- |
+| **`IdModuloUveg`** | **Llave de búsqueda y operaciones** (`?IdModuloUveg=324`). Todas las búsquedas y deduplicaciones operan sobre este campo. | Parámetro `?id=324` de la URL del curso (persistido en `localStorage` bajo `uveg_ultimo_modulo_id`). | Se puede **agregar y editar en el Drawer**, pero **no se muestra en la tabla (`DataTable`)**. |
+| **`Modulo`** *(Nombre visual)* | Nombre descriptivo de la materia para mostrar visualmente en todo el sistema. | Etiqueta `<h1>` general de la página del curso en UVEG (persistido en `localStorage` bajo `uveg_ultimo_modulo_nombre`). | Se **muestra en el `DataTable`** y se puede **agregar y editar en el Drawer**. |
 
-1. **Escaneo Multi-Sección ("Por Arriba") y Detección de Salto Directo a PDF:**
-   - En la vista del curso (`/course/view.php?id={courseId}`), guarda el `id` del módulo activo en `localStorage` (`uveg_ultimo_modulo_id`) y escanea el DOM actual junto con las secciones `mainsection=2`, `mainsection=3` y `mainsection=4` en segundo plano (`credentials: 'include'`).
-   - Si el navegador da un salto directo a una pestaña PDF de UVEG (`.../pluginfile.php/.../L3_Comic.pdf`), detecta automáticamente el archivo PDF en curso, recupera el `id` del módulo activo y lo preserva en Supabase.
+### B) Tabla `contabilidad_modulo_leccion`
+| Campo | Propósito en el Sistema | Origen en la Extensión UVEG | Comportamiento en UI (`planificador_personal`) |
+| :--- | :--- | :--- | :--- |
+| **`Codigo`** | **Llave de búsqueda, deduplicación y carpeta en Supabase** (`LEC_L1`, `CPFI_L4`, `L3_Comic`). Todas las búsquedas (`?Codigo=...`) y `updateOrCreate` operan sobre este campo. | `id` del contenedor (`LEC_L1..LEC_L11`), `title` del iframe Genially (`CPFI_L4..CPFI_L12`) o nombre del archivo PDF (`L3_Comic`). | Se puede **agregar y editar en el Drawer** y se muestra en la **primera columna (`Código`)** de la tabla. |
+| **`Nombre`** *(Nombre visual)* | Título completo de la lección para mostrar visualmente al usuario. | Texto de `<p class="leccion2-pLeccion">Lección 1. Definición y disposiciones generales de las personas físicas</p>` (mapeado por unidad y número de lección `1..12` en `localStorage`). | Se puede **agregar y editar en el Drawer** y se muestra **al lado derecho de la columna `Código`** en la tabla. |
+| **`UrlLeccion`** | Enlace público de **Supabase Storage** (`.../story.html` o `.../*.pdf`) o enlace directo de **Genially**. | Generado tras subir el paquete SCORM o PDF al bucket `lecciones-scorm` en Supabase. | Abre el visor modal interactivo (`IframeModal`). |
 
-2. **Detección Híbrida de Lecciones (Genially + SCORM + PDFs de Lección):**
-   - **Lecciones Genially (`<iframe>`):** Detecta iframes alojados en `view.genially.com` / `view.genial.ly` y extrae su código de lección desde el atributo `title` (ej. `CPFI_L4`, `CPFI_L6`, `CPFI_L8`, `CPFI_L9`, `CPFI_L12`) o contenedor padre.
-   - **Lecciones SCORM (`.container-lesson` / `id="LEC_L1"`):**
-     - Extrae el código directamente del `id` del contenedor (`LEC_L1`, `LEC_L2`, `LEC_L3`, `LEC_L5`, `LEC_L7`, `LEC_L10`, `LEC_L11`) cuando no hay texto de encabezado.
-     - Prioriza el selector `.img-leccion` (ya sea con `data-link`, envuelto en `<a href="...">` o `onclick`) dentro de cada `.container-lesson` que no tenga ya un Genially, evitando guardar los paquetes SCORM correspondientes a **Ejercicios** (`id=3270`, `id=3272`, etc.).
-   - **Lecciones o Recursos PDF (`mod_resource` / `.pdf` como `L3_Comic.pdf`):**
-     - Soporta los **3 escenarios** donde aparece un PDF de lección:
-       1. **Desde `.container-lesson` o `/mod/resource/view.php?id=...` en el curso:** Sigue el salto (redirección HTTP o HTML intermedio) hasta `.../pluginfile.php/.../*.pdf`.
-       2. **Dentro de archivos internos de un paquete SCORM (`data.js`, `story.html`, etc.):** Mientras sube un SCORM, escanea su código en busca de saltos a `/pluginfile.php/.../*.pdf`, sube automáticamente esos PDFs a Supabase Storage, reescribe el link dentro del SCORM para que apunte a Supabase y registra el PDF en la base de datos.
-       3. **Salto directo en pestaña del navegador (`.../L3_Comic.pdf`):** Si el usuario abre el PDF en una pestaña, lo descarga, lo sube a Supabase Storage y lo registra en la base de datos.
-     - Limpia automáticamente cualquier registro viejo no migrado a Supabase cuyo nombre sea `"Tiempo estimado..."` o apunte a `/mod/resource/` crudo de UVEG.
-
-3. **Ordenamiento Natural (`L1` a `L12`) sin Colisión entre SCORM y PDF:**
-   - Ordena las lecciones numéricamente de la `1` a la `12` usando `REGEX_CODIGO_LECCION`.
-   - Permite que convivan la lección SCORM (`LEC_L3` $\rightarrow$ `story.html`) y su cómic PDF (`L3_Comic` $\rightarrow$ `L3_Comic.pdf`) sin sobrescribirse entre sí.
-
-4. **Resolución Profunda de Destinos (`resolverDestinoRecurso`) y Subida a Supabase Storage:**
-   - **Si el destino es un paquete SCORM:**
-     1. Extrae `scoid`, `a` (`aId`), `cm` (`cmId`) y `currentorg` desde la URL redirigida, `#scormviewform` y `M.mod_scorm.init(...)`.
-     2. Consulta `loadSCO.php` para obtener la ruta base `/pluginfile.php/{contextId}/mod_scorm/content/{revision}/`.
-     3. Lee `imsmanifest.xml`, descarga todos los recursos y los sube en lotes de 8 al bucket `lecciones-scorm` en:
-        `https://yrdovjgddnjkgwommbqp.supabase.co/storage/v1/object/public/lecciones-scorm/modulo_{idModulo}/{slug}/story.html`
-   - **Si el destino da un salto a un PDF (`destino.tipo === 'pdf'`):**
-     1. Descarga el binario del PDF con las credenciales de sesión de UVEG.
-     2. Lo sube a Supabase Storage con `Content-Type: application/pdf` y `x-upsert: true` en:
-        `https://yrdovjgddnjkgwommbqp.supabase.co/storage/v1/object/public/lecciones-scorm/modulo_{idModulo}/{slug}/{archivo}.pdf`
-
-5. **Soporte de PDFs y SCORM en `planificador_personal` (`IframeModal`):**
-   - En `resources/js/components/contabilidad/lecciones/iframe-modal.tsx`:
-     - **`esSupabaseHtml` (`.html`):** Descarga el `story.html` e inyecta `<base>` y el interceptor de prototipos (`DATA_PATH_BASE`, `script.src`, `img.src`, `fetch`, `XMLHttpRequest`) mediante `srcDoc`.
-     - **`esSupabasePdf` (`.pdf`):** Descarga el PDF desde Supabase (`arrayBuffer`), crea un `new Blob([buffer], { type: 'application/pdf' })` con `URL.createObjectURL(blob)` y lo carga en el `<iframe>` para renderizar el visor nativo de PDF sin bloqueos de `Content-Security-Policy: sandbox`.
+> **Regla especial para PDFs de salto (ej. `L3_Comic.pdf`)**:
+> Cuando se detecta un PDF de salto adicional cuyo código es `L3_Comic` (lección `3`), su campo **`Codigo`** se guarda como `"L3_Comic"` y su campo **`Nombre`** toma exactamente el mismo `<p class="leccion2-pLeccion">` de la **Lección 3**. Como la llave de búsqueda y carpeta en Supabase es `Codigo`, ambos registros (`LEC_L3` y `L3_Comic`) conviven con el mismo `Nombre` visual sin colisionar ni sobrescribirse.
 
 ---
 
-## 2. Estructura de Archivos
+## 2. Resumen del Flujo de Sincronización ("Por Arriba")
 
-| Archivo | Propósito |
-| :--- | :--- |
-| `manifest.json` | Configuración Manifest V3, permisos de host (`*.uveg.edu.mx`, `*.supabase.co`, API Laravel Cloud) e inyección de `content.js` en `document_idle`. |
-| `content.js` | Script principal de detección, escaneo multi-sección, extracción SCORM y PDF, subida a Supabase Storage y sincronización con la API. |
-| `RESPALDO_EXTENSION.md` | Respaldo íntegro con el código fuente completo de `manifest.json`, `content.js` e `iframe-modal.tsx`. |
-| `prueba.html` | Archivo HTML local para pruebas de detección. |
-| `img/` | Iconos de la extensión (`16`, `48`, `128`). |
+Al entrar a la página principal de un curso en UVEG (`https://avalicmod19d.uveg.edu.mx/course/view.php?id=324`) o al abrir un enlace que salte a un PDF de lección (`.../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf`), la extensión ejecuta automáticamente:
+
+1. **Captura del Módulo (`IdModuloUveg` + `<h1>`) y Escaneo Multi-Sección (`mainsection=2, 3, 4`):**
+   - Guarda `IdModuloUveg` (`324`) y el texto del `<h1>` general en `localStorage`.
+   - Escanea en segundo plano (`credentials: 'include'`) las Unidades 1, 2 y 3 (`mainsection=2, 3, 4`).
+   - Extrae todos los `<p class="leccion2-pLeccion">` de las 3 unidades y construye un diccionario por número de lección (`1` al `12`) en `localStorage` (`uveg_mapa_pleccion_324`).
+
+2. **Detección Híbrida de Lecciones (Genially + SCORM + PDFs de Salto):**
+   - **Lecciones Genially (`<iframe>`):** Extrae `Codigo` (`CPFI_L4`, `CPFI_L6`, `CPFI_L8`, `CPFI_L9`, `CPFI_L12`) y le asocia su `Nombre` desde `<p class="leccion2-pLeccion">` de la lección correspondiente.
+   - **Lecciones SCORM (`.container-lesson` / `id="LEC_L1..L11"`):** Prioriza `.img-leccion`, extrae `Codigo` (`LEC_L1..L11`) y su `Nombre` desde `<p class="leccion2-pLeccion">`, ignorando ejercicios SCORM secundarios.
+   - **Saltos a PDF (`L3_Comic.pdf`):** Soporta saltos desde `.container-lesson` / `mod_resource`, saltos internos dentro de archivos `data.js`/`story.html` de un SCORM, y pestañas donde se abre directamente el `.pdf`.
+
+3. **Resolución Profunda (`resolverDestinoRecurso`) y Subida a Supabase Storage:**
+   - **SCORM:** Extrae `scoid`, `aId`, `cmId` y `currentorg` (`M.mod_scorm.init` / `#scormviewform`), consulta `loadSCO.php`, lee `imsmanifest.xml` y sube todos los archivos en lotes de 8 a:
+     `https://yrdovjgddnjkgwommbqp.supabase.co/storage/v1/object/public/lecciones-scorm/modulo_{IdModuloUveg}/{slug_codigo}/story.html`
+   - **PDF:** Descarga el binario del PDF y lo sube con `Content-Type: application/pdf` a:
+     `https://yrdovjgddnjkgwommbqp.supabase.co/storage/v1/object/public/lecciones-scorm/modulo_{IdModuloUveg}/{slug_codigo}/{archivo}.pdf`
+
+4. **Sincronización y Auto-Actualización en Base de Datos:**
+   - Busca el módulo por `?IdModuloUveg=324`. Si ya existía sin `IdModuloUveg` o sin el título del `<h1>`, lo actualiza automáticamente vía `PUT`.
+   - Compara las lecciones existentes por `Codigo`. Si una lección ya existía en Supabase pero aún no tenía su `Codigo` o su `Nombre` de `<p class="leccion2-pLeccion">`, actualiza sus metadatos vía `PUT` sin volver a subir los archivos.
 
 ---
 
 ## 3. Mapa de Funciones Principales en `content.js`
 
-- **`obtenerIdModulo()`**: Obtiene y persiste en `localStorage` el `?id=` del curso (ej. `324`) para reutilizarlo incluso cuando el navegador salta a un PDF en `/pluginfile.php/...`.
-- **`esUrlPdfDirecto(urlStr)` / `extraerNombreArchivoPdf(urlStr)`**: Detecta URLs `.pdf` y extrae el nombre limpio del archivo (ej. `L3_Comic.pdf`).
-- **`extraerElementoYUrlDeContenedor(cont)`**: Busca el recurso de lección dentro de `.container-lesson` priorizando `.img-leccion` (atributos `data-link`, `<a href>` padre o `onclick`).
-- **`encontrarLeccionesEnDocumento(doc)`**: Detecta PDFs abiertos directamente en pestaña, iframes de Genially, contenedores `.container-lesson` (`#LEC_L1..#LEC_L12`) y enlaces a recursos PDF de lección.
-- **`resolverDestinoRecurso(url)`**: Sigue los saltos desde `view.php` $\rightarrow$ `player.php` $\rightarrow$ `loadSCO.php` y distingue automáticamente si el destino final es un paquete SCORM (`{ tipo: 'scorm', url }`) o un documento PDF (`{ tipo: 'pdf', url, blob }`).
-- **`preservarPdfEnSupabase(idModulo, tituloPreferido, urlPdf, blobPreCargado)`**: Sube el archivo `.pdf` a Supabase Storage con `Content-Type: application/pdf` y devuelve su URL pública.
-- **`preservarScormEnSupabase(idModulo, titulo, scormUrl, pdfsExtraDescubiertos)`**: Sube todos los archivos del paquete SCORM (o delega a `preservarPdfEnSupabase` si el salto aterrizó en un PDF) y detecta saltos a PDFs dentro del código del SCORM.
-- **`ejecutarSincronizacion()`**: Orquesta todo el flujo, deduplica con `yaExisteEnLista()` y muestra notificaciones Toast discretas en la esquina superior derecha.
+- **`obtenerIdModulo()` / `obtenerNombreModuloH1(doc)`**: Extraen y persisten en `localStorage` el `IdModuloUveg` (`324`) y el nombre visual del `<h1>`.
+- **`extraerMapaPLeccionDeDocumento(doc, idModulo)` / `obtenerNombrePLeccion(...)`**: Construyen y consultan el diccionario de `<p class="leccion2-pLeccion">` para las lecciones `1` a `12`.
+- **`extraerCodigoElemento(...)`**: Obtiene el código interno (`LEC_L1`, `CPFI_L4`, `L3_Comic`).
+- **`encontrarLeccionesEnDocumento(doc)`**: Detecta las lecciones devolviendo `{ codigo, nombre, url, numero, esPdf }`.
+- **`resolverDestinoRecurso(url)`**: Desambigua si un recurso aterriza en un paquete SCORM o da un salto a un archivo PDF.
+- **`preservarScormEnSupabase(...)` / `preservarPdfEnSupabase(...)`**: Suben paquetes SCORM y documentos PDF a Supabase Storage usando `crearSlug(codigo)`.
+- **`buscarModulo` / `crearModulo` / `actualizarModulo` / `crearLeccion` / `actualizarLeccion`**: Sincronizan con `/api/contabilidad/modulos` y `/api/contabilidad/lecciones`.
 
 ---
 

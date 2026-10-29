@@ -688,7 +688,31 @@
         return encontrarLeccionesEnDocumento(doc);
     }
 
-    // Escaneo de secciones 2, 3, 4 en el campus virtual UVEG
+    function esperar(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    async function fetchConReintento(url, opciones = {}, reintentos = 3, esperaBaseMs = 500) {
+        let ultimoError = null;
+        for (let intento = 1; intento <= reintentos; intento++) {
+            try {
+                const res = await fetch(url, opciones);
+                if (res.ok || (res.status >= 300 && res.status < 500 && res.status !== 408 && res.status !== 429)) {
+                    return res;
+                }
+                ultimoError = new Error(`HTTP ${res.status}`);
+            } catch (err) {
+                ultimoError = err;
+            }
+            if (intento < reintentos) {
+                await esperar(esperaBaseMs * intento);
+            }
+        }
+        if (ultimoError) throw ultimoError;
+        return fetch(url, opciones);
+    }
+
+    // Escaneo secuencial con reintentos de las secciones 2, 3 y 4 en el campus virtual UVEG (evita bloqueo de sesión PHP en Moodle)
     async function escanearTodasLasSecciones(courseId) {
         if (escaneandoSecciones || !courseId || hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
             return;
@@ -698,31 +722,41 @@
         const seccionesAExplorar = [2, 3, 4];
 
         try {
-            const promesas = seccionesAExplorar.map(async (sec) => {
-                const urlSeccion = `${window.location.origin}/course/view.php?id=${courseId}&mainsection=${sec}`;
-                try {
-                    const resp = await fetch(urlSeccion, { credentials: 'include' });
-                    if (!resp.ok) return [];
-                    const html = await resp.text();
-                    const parser = new DOMParser();
-                    const docSec = parser.parseFromString(html, 'text/html');
-                    return encontrarIframesEnDocumento(docSec);
-                } catch {
-                    return [];
-                }
-            });
-
-            const resultados = await Promise.all(promesas);
             const urlsVistas = new Set(itemsAcumulados.map(it => normalizarUrl(it.url)));
 
-            for (const lista of resultados) {
-                for (const it of lista) {
+            for (const sec of seccionesAExplorar) {
+                const urlSeccion = `${window.location.origin}/course/view.php?id=${courseId}&mainsection=${sec}`;
+                let halladosEnSeccion = [];
+
+                for (let intentoSec = 1; intentoSec <= 3; intentoSec++) {
+                    try {
+                        const resp = await fetchConReintento(urlSeccion, { credentials: 'include' }, 3, 500);
+                        if (resp.ok) {
+                            const html = await resp.text();
+                            const parser = new DOMParser();
+                            const docSec = parser.parseFromString(html, 'text/html');
+                            halladosEnSeccion = encontrarIframesEnDocumento(docSec);
+                            if (halladosEnSeccion.length > 0) {
+                                break;
+                            }
+                        }
+                    } catch (errSec) {
+                        console.warn(`[UVEG Guardado] Intento ${intentoSec} fallido en sección ${sec}:`, errSec);
+                    }
+                    if (intentoSec < 3) {
+                        await esperar(500 * intentoSec);
+                    }
+                }
+
+                for (const it of halladosEnSeccion) {
                     const norm = normalizarUrl(it.url);
                     if (!urlsVistas.has(norm)) {
                         urlsVistas.add(norm);
                         itemsAcumulados.push(it);
                     }
                 }
+
+                await esperar(150);
             }
         } catch (e) {
             console.warn('[UVEG Guardado] Error al escanear secciones remotas:', e);
@@ -733,16 +767,37 @@
 
     // --- RESOLUCIÓN Y SUBIDA SCORM / PDF A SUPABASE STORAGE ---
 
-    function extraerRutaContent(texto) {
-        if (!texto) return null;
-        let limpio = String(texto).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+    function normalizarHtmlScorm(texto) {
+        if (!texto) return '';
+        let limpio = String(texto)
+            .replace(/\\u0026/gi, '&')
+            .replace(/\\u002f/gi, '/')
+            .replace(/\\x26/gi, '&')
+            .replace(/\\\//g, '/')
+            .replace(/\\"/g, '"')
+            .replace(/&amp;/gi, '&');
         try {
-            if (/%2F/i.test(limpio)) {
+            if (/%2F|%3A|%3F|%26/i.test(limpio)) {
                 limpio += ' ' + decodeURIComponent(limpio);
             }
         } catch {}
+        return limpio;
+    }
 
-        const match = limpio.match(/(https?:\/\/[^"'\s<>]+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
+    function limpiarRutaManifest(rutaRaw) {
+        if (!rutaRaw) return '';
+        return String(rutaRaw)
+            .trim()
+            .replace(/&amp;/gi, '&')
+            .replace(/\\/g, '/')
+            .replace(/^(\.\/|\/)+/, '');
+    }
+
+    function extraerRutaContent(texto) {
+        if (!texto) return null;
+        const limpio = normalizarHtmlScorm(texto);
+
+        const match = limpio.match(/(https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
         if (match) return match[1];
 
         const matchRel = limpio.match(/(\/pluginfile\.php\/\d+\/mod_scorm\/content\/\d+\/)/i);
@@ -756,12 +811,7 @@
 
     function extraerUrlPdfDesdeTexto(texto, baseUrl = window.location.origin) {
         if (!texto) return null;
-        let limpio = String(texto).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
-        try {
-            if (/%2F/i.test(limpio)) {
-                limpio += ' ' + decodeURIComponent(limpio);
-            }
-        } catch {}
+        const limpio = normalizarHtmlScorm(texto);
 
         const matchAbs = limpio.match(/(https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?)/i);
         if (matchAbs) return matchAbs[1];
@@ -786,8 +836,8 @@
             }
         } catch {}
 
-        const limpio = String(html).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
-        const matchSco = limpio.match(/((?:https?:\/\/[^"'\s<>]+|[a-zA-Z0-9_./:-]*)\bloadSCO\.php\?[^"'\s<>]+)/i);
+        const limpio = normalizarHtmlScorm(html);
+        const matchSco = limpio.match(/((?:https?:\/\/[^"'\s<>\\]+|[a-zA-Z0-9_./:-]*)\bloadSCO\.php\?[^"'\s<>\\]+)/i);
         if (matchSco) {
             try {
                 return new URL(matchSco[1], baseUrl).href;
@@ -818,48 +868,68 @@
         }
 
         if (!html) return out;
-        const limpio = String(html).replace(/\\\//g, '/').replace(/&amp;/gi, '&');
+        const limpio = normalizarHtmlScorm(html);
 
         try {
             const doc = new DOMParser().parseFromString(html, 'text/html');
-            for (const input of doc.querySelectorAll('input[name], select[name]')) {
+            const formScope = doc.querySelector('form#scormviewform, form[action*="player.php"]') || doc;
+            for (const input of formScope.querySelectorAll('input[name], select[name]')) {
                 const name = (input.getAttribute('name') || '').toLowerCase();
                 const type = (input.getAttribute('type') || '').toLowerCase();
                 if ((type === 'radio' || type === 'checkbox') && !input.checked && !input.hasAttribute('checked')) continue;
                 const val = (input.value || input.getAttribute('value') || '').trim();
                 if (!val) continue;
-                if (name === 'cm' || name === 'id') out.cmId = out.cmId || val;
-                if (name === 'a') out.aId = out.aId || val;
-                if (name === 'scoid') out.scoid = out.scoid || val;
+                if ((name === 'cm' || name === 'id') && /^[1-9]\d*$/.test(val)) out.cmId = out.cmId || val;
+                if (name === 'a' && /^[1-9]\d*$/.test(val)) out.aId = out.aId || val;
+                if (name === 'scoid' && /^[1-9]\d*$/.test(val)) out.scoid = out.scoid || val;
                 if (name === 'currentorg') out.currentorg = out.currentorg || val;
                 if (name === 'mode') out.mode = out.mode || val;
                 if (name === 'attempt') out.attempt = out.attempt || val;
             }
         } catch {}
 
-        const mScoid = limpio.match(/[?&]scoid=(\d+)/i) || limpio.match(/["']scoid["']\s*[:=,]\s*["']?(\d+)/i);
+        // 1. Extraer combinación directa a=XXXX&scoid=YYYY (presente en player.php y en el JSON de M.mod_scorm.init)
+        const mCombo = limpio.match(/(?:^|[^a-zA-Z0-9_])a=([1-9]\d*)&scoid=([1-9]\d*)(?:&currentorg=([^&"'\s<>\\]*))?(?:&mode=([^&"'\s<>\\]*))?(?:&attempt=(\d+))?/i);
+        if (mCombo) {
+            out.aId = mCombo[1];
+            out.scoid = mCombo[2];
+            if (mCombo[3] && !out.currentorg) {
+                try { out.currentorg = decodeURIComponent(mCombo[3]); } catch { out.currentorg = mCombo[3]; }
+            }
+            if (mCombo[4] && !out.mode) out.mode = mCombo[4];
+            if (mCombo[5]) out.attempt = mCombo[5];
+        }
+
+        // 2. Respaldo individual de parámetros en URLs o JSON
+        const mScoid = limpio.match(/[?&]scoid=([1-9]\d*)/i) || limpio.match(/["']scoid["']\s*[:=,]\s*["']?([1-9]\d*)/i);
         if (mScoid && !out.scoid) out.scoid = mScoid[1];
 
-        const mCm = limpio.match(/[?&]cm=(\d+)/i);
+        const mCm = limpio.match(/[?&]cm=([1-9]\d*)/i);
         if (mCm && !out.cmId) out.cmId = mCm[1];
 
-        const mA = limpio.match(/[?&]a=(\d+)/i);
+        const mA = limpio.match(/(?:[?&]|["'])a=([1-9]\d*)(?:&|["'])/i);
         if (mA && !out.aId) out.aId = mA[1];
 
-        const mOrg = limpio.match(/[?&]currentorg=([^&"'\s<>]+)/i);
+        const mOrg = limpio.match(/[?&]currentorg=([^&"'\s<>\\]+)/i);
         if (mOrg && !out.currentorg) {
             try { out.currentorg = decodeURIComponent(mOrg[1]); } catch { out.currentorg = mOrg[1]; }
         }
 
-        // Extraer de M.mod_scorm.init(Y, ..., a, scoid, currentorg, mode, attempt, cm, ...)
-        const mInit = limpio.match(/M\.mod_scorm\.init\s*\(([\s\S]*?)\)/i);
-        if (mInit) {
-            const argsStr = mInit[1];
-            const mPar = argsStr.match(/["']?(\d+)["']?\s*,\s*["']?(\d+)["']?\s*,\s*["']([^"']*)["']/);
-            if (mPar) {
-                if (!out.aId) out.aId = mPar[1];
-                if (!out.scoid) out.scoid = mPar[2];
-                if (!out.currentorg && mPar[3]) out.currentorg = mPar[3];
+        // 3. Extraer desde M.mod_scorm.init(Y, ..., launch_sco, {TOC_JSON}, currentorg, aId, cmId, attempt, mode, ...)
+        const idxInit = limpio.search(/M\.mod_scorm\.init\s*\(/i);
+        if (idxInit !== -1) {
+            const argsStr = limpio.slice(idxInit, idxInit + 25000);
+            if (!out.scoid) {
+                const mLaunchSco = argsStr.match(/,\s*["']?([1-9]\d*)["']?\s*,\s*(?:\{\s*["']|null\b)/);
+                if (mLaunchSco) out.scoid = mLaunchSco[1];
+            }
+            if (out.cmId) {
+                const reBeforeCm = new RegExp('["\']([^"\']*)["\']\\s*,\\s*["\']?([1-9]\\d*)["\']?\\s*,\\s*["\']?' + out.cmId + '["\']?\\b');
+                const mBeforeCm = argsStr.match(reBeforeCm);
+                if (mBeforeCm) {
+                    if (!out.currentorg && mBeforeCm[1]) out.currentorg = mBeforeCm[1];
+                    if (!out.aId && mBeforeCm[2]) out.aId = mBeforeCm[2];
+                }
             }
         }
 
@@ -869,12 +939,13 @@
     async function probarLoadSco(urlSco) {
         if (!urlSco) return null;
         try {
-            const resSco = await fetch(urlSco, { credentials: 'include' });
+            const resSco = await fetchConReintento(urlSco, { credentials: 'include' }, 2, 450);
             if (esUrlPdfDirecto(resSco.url)) {
+                try { if (resSco.body) resSco.body.cancel(); } catch {}
                 return { tipo: 'pdf', url: resSco.url };
             }
             const desdeUrl = extraerRutaContent(resSco.url);
-            if (desdeUrl) return { tipo: 'scorm', url: desdeUrl };
+            if (desdeUrl) return { tipo: 'scorm', url: desdeUrl, launchUrl: resSco.url };
 
             if (resSco.ok) {
                 const cType = (resSco.headers.get('content-type') || '').toLowerCase();
@@ -916,13 +987,15 @@
     }
 
     // Resuelve el destino de una lección (ya sea que aterrice en un paquete SCORM o dé un salto a un PDF como L3_Comic.pdf)
-    async function resolverDestinoRecurso(url) {
+    async function resolverDestinoRecurso(url, opciones = {}) {
+        const descargarBlobPdf = Boolean(opciones.descargarBlobPdf);
+
         if (esUrlPdfDirecto(url)) {
             return { tipo: 'pdf', url: new URL(url, window.location.href).href };
         }
 
         const directo = extraerRutaContent(url);
-        if (directo) return { tipo: 'scorm', url: directo };
+        if (directo) return { tipo: 'scorm', url: directo, launchUrl: url };
 
         try {
             const uObj = new URL(url, window.location.href);
@@ -930,18 +1003,22 @@
             let estadoParams = extraerParametrosScorm('', uObj.href, {});
 
             // Paso 1: Consultar la URL inicial (por ejemplo, /mod/scorm/view.php?id=... o /mod/resource/view.php?id=...)
-            const resView = await fetch(uObj.href, { credentials: 'include' });
+            const resView = await fetchConReintento(uObj.href, { credentials: 'include' }, 3, 500);
             const baseActual = resView.url || uObj.href;
             const cTypeView = (resView.headers.get('content-type') || '').toLowerCase();
 
             // Si al dar el salto redirige directamente a un PDF (ej. .../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf)
             if (esUrlPdfDirecto(baseActual) || cTypeView.includes('application/pdf')) {
-                const blobPdf = await resView.blob();
-                return { tipo: 'pdf', url: baseActual, blob: blobPdf };
+                if (descargarBlobPdf) {
+                    const blobPdf = await resView.blob();
+                    return { tipo: 'pdf', url: baseActual, blob: blobPdf };
+                }
+                try { if (resView.body) resView.body.cancel(); } catch {}
+                return { tipo: 'pdf', url: baseActual };
             }
 
             const desdeViewUrl = extraerRutaContent(baseActual);
-            if (desdeViewUrl) return { tipo: 'scorm', url: desdeViewUrl };
+            if (desdeViewUrl) return { tipo: 'scorm', url: desdeViewUrl, launchUrl: baseActual };
 
             if (!resView.ok) return null;
             const htmlView = await resView.text();
@@ -999,26 +1076,27 @@
 
             const intentosPlayer = [];
             if (Array.from(formParams.keys()).length > 0) {
-                intentosPlayer.push(() => fetch(urlPlayer, {
+                intentosPlayer.push(() => fetchConReintento(urlPlayer, {
                     method: 'POST',
                     credentials: 'include',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: formParams.toString()
-                }));
+                }, 2, 450));
             }
 
             const sep = urlPlayer.includes('?') ? '&' : '?';
             const urlPlayerGet = Array.from(formParams.keys()).length > 0 ? `${urlPlayer}${sep}${formParams.toString()}` : urlPlayer;
-            intentosPlayer.push(() => fetch(urlPlayerGet, { credentials: 'include' }));
+            intentosPlayer.push(() => fetchConReintento(urlPlayerGet, { credentials: 'include' }, 2, 450));
 
             for (const ejecutarFetchPlayer of intentosPlayer) {
                 try {
                     const resPlayer = await ejecutarFetchPlayer();
                     if (esUrlPdfDirecto(resPlayer.url)) {
+                        try { if (resPlayer.body) resPlayer.body.cancel(); } catch {}
                         return { tipo: 'pdf', url: resPlayer.url };
                     }
                     const desdePlayerUrl = extraerRutaContent(resPlayer.url);
-                    if (desdePlayerUrl) return { tipo: 'scorm', url: desdePlayerUrl };
+                    if (desdePlayerUrl) return { tipo: 'scorm', url: desdePlayerUrl, launchUrl: resPlayer.url };
 
                     if (resPlayer.ok) {
                         const htmlPlayer = await resPlayer.text();
@@ -1052,25 +1130,36 @@
         return null;
     }
 
-    async function obtenerArchivosScorm(baseScorm) {
-        const manifestRes = await fetch(baseScorm + 'imsmanifest.xml', { credentials: 'include' });
-        if (!manifestRes.ok) throw new Error('Error al leer imsmanifest.xml (' + manifestRes.status + ')');
-        const manifestXml = await manifestRes.text();
-
+    async function obtenerArchivosScorm(baseScorm, launchUrl = '') {
         const listaArchivos = new Set();
-        listaArchivos.add('imsmanifest.xml');
         listaArchivos.add('story.html');
         listaArchivos.add('index.html');
+        listaArchivos.add('index_lms.html');
 
-        let m;
-        const fileRegex = /<file\b[^>]*\bhref=["']([^"']+)["']/gi;
-        while ((m = fileRegex.exec(manifestXml)) !== null) {
-            if (m[1]) listaArchivos.add(m[1].trim());
+        if (launchUrl && launchUrl.startsWith(baseScorm)) {
+            const relLaunch = limpiarRutaManifest(launchUrl.slice(baseScorm.length).split('?')[0]);
+            if (relLaunch) listaArchivos.add(relLaunch);
         }
 
-        const resRegex = /<resource\b[^>]*\bhref=["']([^"']+)["']/gi;
-        while ((m = resRegex.exec(manifestXml)) !== null) {
-            if (m[1]) listaArchivos.add(m[1].trim());
+        const manifestRes = await fetchConReintento(baseScorm + 'imsmanifest.xml', { credentials: 'include' }, 3, 500);
+        if (manifestRes.ok) {
+            const manifestXml = await manifestRes.text();
+            listaArchivos.add('imsmanifest.xml');
+
+            let m;
+            const fileRegex = /<file\b[^>]*\bhref=["']([^"']+)["']/gi;
+            while ((m = fileRegex.exec(manifestXml)) !== null) {
+                const r = limpiarRutaManifest(m[1]);
+                if (r) listaArchivos.add(r);
+            }
+
+            const resRegex = /<resource\b[^>]*\bhref=["']([^"']+)["']/gi;
+            while ((m = resRegex.exec(manifestXml)) !== null) {
+                const r = limpiarRutaManifest(m[1]);
+                if (r) listaArchivos.add(r);
+            }
+        } else if (listaArchivos.size === 0) {
+            throw new Error('Error al leer imsmanifest.xml (' + manifestRes.status + ')');
         }
 
         return Array.from(listaArchivos);
@@ -1078,20 +1167,32 @@
 
     async function subirArchivoSupabase(rutaBucket, blobOrBuffer, contentType) {
         const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${rutaBucket}`;
-        const resp = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-                'Content-Type': contentType,
-                'x-upsert': 'true'
-            },
-            body: blobOrBuffer
-        });
-        if (!resp.ok) {
-            const err = await resp.text();
-            throw new Error(`Supabase [${resp.status}]: ${err}`);
+        let ultimoErr = null;
+
+        for (let intento = 1; intento <= 3; intento++) {
+            try {
+                const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+                        'Content-Type': contentType,
+                        'x-upsert': 'true'
+                    },
+                    body: blobOrBuffer
+                });
+                if (resp.ok) {
+                    return true;
+                }
+                const errTxt = await resp.text();
+                ultimoErr = new Error(`Supabase [${resp.status}]: ${errTxt}`);
+            } catch (e) {
+                ultimoErr = e;
+            }
+            if (intento < 3) {
+                await esperar(500 * intento);
+            }
         }
-        return true;
+        throw ultimoErr || new Error('Error al subir archivo a Supabase');
     }
 
     async function preservarPdfEnSupabase(idModulo, tituloPreferido, urlPdf, blobPreCargado = null) {
@@ -1099,7 +1200,7 @@
         let urlFinal = urlPdf;
 
         if (!blob) {
-            const res = await fetch(urlPdf, { credentials: 'include' });
+            const res = await fetchConReintento(urlPdf, { credentials: 'include' }, 3, 550);
             if (!res.ok) {
                 throw new Error(`Error al descargar PDF (${res.status})`);
             }
@@ -1128,7 +1229,7 @@
     }
 
     async function preservarScormEnSupabase(idModulo, titulo, scormUrl, pdfsExtraDescubiertos = []) {
-        const destino = await resolverDestinoRecurso(scormUrl);
+        const destino = await resolverDestinoRecurso(scormUrl, { descargarBlobPdf: true });
         if (!destino) {
             throw new Error('No se pudo localizar la ruta del paquete SCORM o PDF');
         }
@@ -1138,18 +1239,20 @@
             return await preservarPdfEnSupabase(idModulo, titulo, destino.url, destino.blob || null);
         }
 
-        const baseScorm = destino.url;
-        const archivos = await obtenerArchivosScorm(baseScorm);
+        const baseScorm = destino.url.endsWith('/') ? destino.url : (destino.url + '/');
+        const archivos = await obtenerArchivosScorm(baseScorm, destino.launchUrl || '');
         const slugCarpeta = crearSlug(titulo);
         const slug = `modulo_${idModulo}/${slugCarpeta}`;
         const urlsPdfInternas = new Set();
+        let archivosSubidos = 0;
 
-        const BATCH_SIZE = 8;
+        const BATCH_SIZE = 5;
         for (let i = 0; i < archivos.length; i += BATCH_SIZE) {
             const lote = archivos.slice(i, i + BATCH_SIZE);
             await Promise.all(lote.map(async (ruta) => {
                 try {
-                    const res = await fetch(baseScorm + ruta, { credentials: 'include' });
+                    const urlArchivo = new URL(ruta, baseScorm).href;
+                    const res = await fetchConReintento(urlArchivo, { credentials: 'include' }, 3, 450);
                     if (res.ok) {
                         const mime = getMimeType(ruta);
                         let bodySubida = null;
@@ -1157,7 +1260,7 @@
                         // Si es un archivo de datos/código del SCORM (ej. data.js, story.html), detectar si tiene un salto a un PDF de UVEG (como L3_Comic.pdf)
                         if (/\.(js|html|htm|xml|json)$/i.test(ruta)) {
                             let texto = await res.text();
-                            const limpio = texto.replace(/\\\//g, '/');
+                            const limpio = normalizarHtmlScorm(texto);
                             const regexPdfUveg = /https?:\/\/[^"'\s<>\\]+\/pluginfile\.php\/\d+\/[^"'\s<>\\]+\.pdf(?:\?[^"'\s<>\\]*)?/gi;
                             let matchPdf;
                             while ((matchPdf = regexPdfUveg.exec(limpio)) !== null) {
@@ -1182,6 +1285,7 @@
 
                         const rutaEnBucket = `${slug}/${ruta}`.replace(/\/+/g, '/');
                         await subirArchivoSupabase(rutaEnBucket, bodySubida, mime);
+                        archivosSubidos++;
                     }
                 } catch (err) {
                     console.warn(`[UVEG Guardado] Error subiendo ${ruta}:`, err);
@@ -1189,8 +1293,14 @@
             }));
         }
 
+        if (archivosSubidos === 0) {
+            throw new Error('No se pudieron subir los archivos del paquete SCORM a Supabase');
+        }
+
         for (const uPdf of urlsPdfInternas) {
-            pdfsExtraDescubiertos.push(uPdf);
+            if (!pdfsExtraDescubiertos.includes(uPdf)) {
+                pdfsExtraDescubiertos.push(uPdf);
+            }
         }
 
         return {
@@ -1204,10 +1314,10 @@
     async function buscarModulo(idModuloUveg) {
         const idStr = String(idModuloUveg).trim();
         const url = `${API_BASE_URL}/modulos?IdModuloUveg=${encodeURIComponent(idStr)}`;
-        const resp = await fetch(url, {
+        const resp = await fetchConReintento(url, {
             method: 'GET',
             headers: { 'Accept': 'application/json' }
-        });
+        }, 3, 500);
 
         if (!resp.ok) throw new Error(`HTTP ${resp.status} al consultar módulo.`);
 
@@ -1226,7 +1336,7 @@
         const idStr = String(idModuloUveg).trim();
         const nomStr = (nombreVisual || idStr).trim();
         const url = `${API_BASE_URL}/modulos`;
-        const resp = await fetch(url, {
+        const resp = await fetchConReintento(url, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1236,7 +1346,7 @@
                 IdModuloUveg: idStr,
                 Modulo: nomStr
             })
-        });
+        }, 3, 500);
 
         if (!resp.ok) throw new Error(`HTTP ${resp.status} al registrar módulo.`);
 
@@ -1247,7 +1357,7 @@
     async function actualizarModulo(idModuloDb, idModuloUveg, nombreVisual) {
         if (!idModuloDb) return null;
         try {
-            const resp = await fetch(`${API_BASE_URL}/modulos/${encodeURIComponent(idModuloDb)}`, {
+            const resp = await fetchConReintento(`${API_BASE_URL}/modulos/${encodeURIComponent(idModuloDb)}`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1257,7 +1367,7 @@
                     IdModuloUveg: String(idModuloUveg).trim(),
                     Modulo: (nombreVisual || idModuloUveg).trim()
                 })
-            });
+            }, 3, 500);
             if (resp.ok) {
                 const res = await resp.json();
                 return res.data || res;
@@ -1268,10 +1378,10 @@
 
     async function obtenerLeccionesDeModulo(idModulo) {
         const url = `${API_BASE_URL}/lecciones?IdModulo=${encodeURIComponent(idModulo)}`;
-        const resp = await fetch(url, {
+        const resp = await fetchConReintento(url, {
             method: 'GET',
             headers: { 'Accept': 'application/json' }
-        });
+        }, 3, 500);
 
         if (!resp.ok) throw new Error(`HTTP ${resp.status} al consultar lecciones.`);
 
@@ -1281,7 +1391,7 @@
 
     async function crearLeccion(idModulo, codigo, nombre, urlLeccion) {
         const url = `${API_BASE_URL}/lecciones`;
-        const resp = await fetch(url, {
+        const resp = await fetchConReintento(url, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1293,7 +1403,7 @@
                 Nombre: nombre || codigo || SIN_TITULO,
                 UrlLeccion: urlLeccion
             })
-        });
+        }, 3, 500);
 
         if (!resp.ok) throw new Error(`HTTP ${resp.status} al guardar lección "${codigo}".`);
 
@@ -1303,7 +1413,7 @@
     async function actualizarLeccion(idLeccion, codigo, nombre, urlLeccion) {
         if (!idLeccion) return null;
         try {
-            const resp = await fetch(`${API_BASE_URL}/lecciones/${encodeURIComponent(idLeccion)}`, {
+            const resp = await fetchConReintento(`${API_BASE_URL}/lecciones/${encodeURIComponent(idLeccion)}`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1314,7 +1424,7 @@
                     Nombre: nombre || codigo || SIN_TITULO,
                     UrlLeccion: urlLeccion
                 })
-            });
+            }, 3, 500);
             if (resp.ok) return await resp.json();
         } catch {}
         return null;
@@ -1323,10 +1433,10 @@
     async function eliminarLeccion(idLeccion) {
         if (!idLeccion) return;
         try {
-            await fetch(`${API_BASE_URL}/lecciones/${encodeURIComponent(idLeccion)}`, {
+            await fetchConReintento(`${API_BASE_URL}/lecciones/${encodeURIComponent(idLeccion)}`, {
                 method: 'DELETE',
                 headers: { 'Accept': 'application/json' }
-            });
+            }, 2, 400);
         } catch {}
     }
 
@@ -1454,7 +1564,7 @@
         }
     }
 
-    // --- PROCESO PRINCIPAL DE GUARDADO Y PRESERVACIÓN ---
+    // --- PROCESO PRINCIPAL DE GUARDADO Y PRESERVACIÓN CON REINTENTOS Y VERIFICACIÓN COMPLETA ---
 
     function buscarExistentePorCodigoOUrl(existentes, codigo, urlCandidata) {
         const itemUrlNorm = normalizarUrl(urlCandidata);
@@ -1479,6 +1589,125 @@
         return Boolean(buscarExistentePorCodigoOUrl(existentes, codigo, urlCandidata));
     }
 
+    async function cargarYLimpiarExistentes(idModuloDb) {
+        const existentesRaw = await obtenerLeccionesDeModulo(idModuloDb);
+        const existentes = [];
+
+        for (const ex of existentesRaw) {
+            const urlEx = (ex.UrlLeccion || '').toLowerCase();
+            const nomEx = (ex.Nombre || '').trim();
+            const codEx = (ex.Codigo || '').trim();
+            if (!urlEx.includes('supabase.co') && (urlEx.includes('/mod/resource/') || /^(tiempo estimado)/i.test(nomEx) || /^(tiempo estimado)/i.test(codEx))) {
+                await eliminarLeccion(ex.id || ex.IdLeccion);
+                continue;
+            }
+            existentes.push(ex);
+        }
+        return existentes;
+    }
+
+    async function sincronizarItemIndividual(item, idx, total, idModulo, idModuloDb, mapaGlobalPLeccion, existentes, pdfsExtraDescubiertos, reintentosMax = 3) {
+        let ultimoError = null;
+
+        for (let intento = 1; intento <= reintentosMax; intento++) {
+            try {
+                let urlFinal = item.url;
+                let codigoFinal = item.codigo || item.titulo;
+                let nombreFinal = item.nombre || codigoFinal;
+
+                if (esRecursoScorm(item.url)) {
+                    // Si es un mod/resource suelto fuera de .container-lesson, verificar primero a dónde salta
+                    if (item.requiereValidarSaltoPdf) {
+                        const destino = await resolverDestinoRecurso(item.url, { descargarBlobPdf: true });
+                        if (!destino || destino.tipo !== 'pdf') {
+                            item.noEsPdfLeccion = true;
+                            return { estado: 'ignorado' };
+                        }
+
+                        const nomPdf = extraerNombreArchivoPdf(destino.url) || '';
+                        if (!REGEX_CODIGO_LECCION.test(nomPdf)) {
+                            item.noEsPdfLeccion = true;
+                            return { estado: 'ignorado' };
+                        }
+
+                        const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                        const numPdf = extraerNumeroLeccion(codigoPdf);
+                        const nombreVisualPdf = (numPdf !== null && mapaGlobalPLeccion[String(numPdf)])
+                            ? mapaGlobalPLeccion[String(numPdf)]
+                            : (item.nombre && item.nombre !== item.codigo ? item.nombre : codigoPdf);
+
+                        item.codigo = codigoPdf;
+                        item.nombre = nombreVisualPdf;
+                        item.requiereValidarSaltoPdf = false;
+                        item.url = destino.url;
+
+                        const regPdfExistente = buscarExistentePorCodigoOUrl(existentes, codigoPdf, destino.url);
+                        if (regPdfExistente) {
+                            if (regPdfExistente.Codigo !== codigoPdf || regPdfExistente.Nombre !== nombreVisualPdf) {
+                                await actualizarLeccion(
+                                    regPdfExistente.id || regPdfExistente.IdLeccion,
+                                    codigoPdf,
+                                    nombreVisualPdf,
+                                    regPdfExistente.UrlLeccion
+                                );
+                                regPdfExistente.Codigo = codigoPdf;
+                                regPdfExistente.Nombre = nombreVisualPdf;
+                            }
+                            return { estado: 'ya_existia' };
+                        }
+
+                        mostrarToast({
+                            tipo: 'info',
+                            mensaje: `Preservando PDF en Supabase (${idx}/${total}): ${codigoPdf}${intento > 1 ? ` [reintento ${intento}]` : ''}...`,
+                            duracionMs: 0
+                        });
+
+                        const resPdf = await preservarPdfEnSupabase(idModulo, codigoPdf, destino.url, destino.blob || null);
+                        codigoFinal = resPdf.tituloFinal || codigoPdf;
+                        nombreFinal = nombreVisualPdf;
+                        urlFinal = resPdf.urlPublica;
+                    } else {
+                        mostrarToast({
+                            tipo: 'info',
+                            mensaje: `Preservando en Supabase (${idx}/${total}): ${codigoFinal}${intento > 1 ? ` [reintento ${intento}]` : ''}...`,
+                            duracionMs: 0
+                        });
+
+                        const resPreservado = await preservarScormEnSupabase(idModulo, codigoFinal, item.url, pdfsExtraDescubiertos);
+                        codigoFinal = resPreservado.tituloFinal || codigoFinal;
+                        const numRes = extraerNumeroLeccion(codigoFinal) ?? item.numero;
+                        if (numRes !== null && numRes !== 999 && mapaGlobalPLeccion[String(numRes)]) {
+                            nombreFinal = mapaGlobalPLeccion[String(numRes)];
+                        }
+                        urlFinal = resPreservado.urlPublica;
+                    }
+                } else {
+                    mostrarToast({
+                        tipo: 'info',
+                        mensaje: `Sincronizando (${idx}/${total}): ${codigoFinal}${intento > 1 ? ` [reintento ${intento}]` : ''}...`,
+                        duracionMs: 0
+                    });
+                }
+
+                if (!yaExisteEnLista(existentes, codigoFinal, urlFinal)) {
+                    await crearLeccion(idModuloDb, codigoFinal, nombreFinal, urlFinal);
+                    existentes.push({ Codigo: codigoFinal, Nombre: nombreFinal, UrlLeccion: urlFinal });
+                    return { estado: 'creado', codigo: codigoFinal };
+                }
+
+                return { estado: 'ya_existia', codigo: codigoFinal };
+            } catch (err) {
+                ultimoError = err;
+                console.warn(`[UVEG Guardado] Intento ${intento}/${reintentosMax} fallido para "${item.codigo || item.titulo}":`, err);
+                if (intento < reintentosMax) {
+                    await esperar(1200 * intento);
+                }
+            }
+        }
+
+        throw ultimoError || new Error(`Fallo al guardar ${item.codigo || item.titulo}`);
+    }
+
     async function ejecutarSincronizacion() {
         if (sincronizando || yaProcesado) return;
         sincronizando = true;
@@ -1501,7 +1730,7 @@
                 }
             }
 
-            // 2. Si estamos en la vista del curso en UVEG (y no en un PDF abierto directamente), escanear secciones 2, 3 y 4
+            // 2. Si estamos en la vista del curso en UVEG (y no en un PDF abierto directamente), escanear secciones 2, 3 y 4 secuencialmente
             if (!enPaginaPdfDirecta && idModulo && hostname.endsWith('uveg.edu.mx')) {
                 await escanearTodasLasSecciones(idModulo);
             }
@@ -1552,7 +1781,7 @@
                 ...sinNumero
             ];
 
-            // 3. Consultar módulo en la API por IdModuloUveg
+            // 3. Consultar o crear módulo en la API por IdModuloUveg
             let modulo = await buscarModulo(idModulo);
             let idModuloDb = null;
 
@@ -1572,190 +1801,158 @@
                 throw new Error('No se pudo determinar el ID del módulo en la base de datos.');
             }
 
-            // 4. Obtener lecciones registradas actualmente en ese módulo y limpiar registros residuales no migrados de mod/resource
-            const existentesRaw = await obtenerLeccionesDeModulo(idModuloDb);
-            const existentes = [];
+            // 4. Ciclo multipasada (hasta 3 pasadas completas con verificación contra la BD) para garantizar que NO falte ninguna lección
+            let exitosCount = 0;
+            let erroresFinales = [];
+            const pdfsExtraDescubiertos = [];
+            const MAX_PASADAS = 3;
 
-            for (const ex of existentesRaw) {
-                const urlEx = (ex.UrlLeccion || '').toLowerCase();
-                const nomEx = (ex.Nombre || '').trim();
-                const codEx = (ex.Codigo || '').trim();
-                if (!urlEx.includes('supabase.co') && (urlEx.includes('/mod/resource/') || /^(tiempo estimado)/i.test(nomEx) || /^(tiempo estimado)/i.test(codEx))) {
-                    await eliminarLeccion(ex.id || ex.IdLeccion);
-                    continue;
+            for (let pasada = 1; pasada <= MAX_PASADAS; pasada++) {
+                erroresFinales = [];
+                const existentes = await cargarYLimpiarExistentes(idModuloDb);
+                const pendientes = [];
+
+                for (const item of itemsUnicos) {
+                    if (item.noEsPdfLeccion) continue;
+
+                    if (!item.requiereValidarSaltoPdf) {
+                        const regExistente = buscarExistentePorCodigoOUrl(existentes, item.codigo, item.url);
+                        if (regExistente) {
+                            const codReg = String(regExistente.Codigo || '').trim();
+                            const nomReg = String(regExistente.Nombre || '').trim();
+                            if ((item.codigo && codReg !== item.codigo) || (item.nombre && item.nombre !== item.codigo && nomReg !== item.nombre)) {
+                                await actualizarLeccion(
+                                    regExistente.id || regExistente.IdLeccion,
+                                    item.codigo,
+                                    item.nombre,
+                                    regExistente.UrlLeccion
+                                );
+                                regExistente.Codigo = item.codigo;
+                                regExistente.Nombre = item.nombre;
+                            }
+                            continue;
+                        }
+                    }
+                    pendientes.push(item);
                 }
-                existentes.push(ex);
-            }
 
-            // 5. Filtrar las lecciones que aún no están registradas y actualizar metadatos (Codigo / Nombre de .leccion2-pLeccion) si ya existen
-            const pendientes = [];
+                if (pendientes.length === 0 && pdfsExtraDescubiertos.length === 0) {
+                    break;
+                }
 
-            for (const item of itemsUnicos) {
-                if (!item.requiereValidarSaltoPdf) {
-                    const regExistente = buscarExistentePorCodigoOUrl(existentes, item.codigo, item.url);
-                    if (regExistente) {
-                        const codReg = String(regExistente.Codigo || '').trim();
-                        const nomReg = String(regExistente.Nombre || '').trim();
-                        if ((item.codigo && codReg !== item.codigo) || (item.nombre && item.nombre !== item.codigo && nomReg !== item.nombre)) {
+                const total = pendientes.length;
+                for (let i = 0; i < total; i++) {
+                    const item = pendientes[i];
+                    try {
+                        const resItem = await sincronizarItemIndividual(
+                            item,
+                            i + 1,
+                            total,
+                            idModulo,
+                            idModuloDb,
+                            mapaGlobalPLeccion,
+                            existentes,
+                            pdfsExtraDescubiertos,
+                            3
+                        );
+                        if (resItem.estado === 'creado') {
+                            exitosCount++;
+                        }
+                    } catch (eItem) {
+                        console.error(`[UVEG Guardado] Falló "${item.codigo}" en pasada ${pasada}:`, eItem);
+                        erroresFinales.push(`${item.codigo}: ${eItem.message}`);
+                    }
+                    await esperar(250);
+                }
+
+                // Procesar PDFs adicionales descubiertos dentro de paquetes SCORM (ej. L3_Comic.pdf)
+                for (const urlPdfExtra of pdfsExtraDescubiertos) {
+                    const nomPdf = extraerNombreArchivoPdf(urlPdfExtra) || 'Documento.pdf';
+                    const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
+                    const numPdf = extraerNumeroLeccion(codigoPdf);
+                    const nombreVisualPdf = (numPdf !== null && mapaGlobalPLeccion[String(numPdf)])
+                        ? mapaGlobalPLeccion[String(numPdf)]
+                        : codigoPdf;
+
+                    const regPdfEx = buscarExistentePorCodigoOUrl(existentes, codigoPdf, urlPdfExtra);
+                    if (regPdfEx) {
+                        if (regPdfEx.Codigo !== codigoPdf || regPdfEx.Nombre !== nombreVisualPdf) {
                             await actualizarLeccion(
-                                regExistente.id || regExistente.IdLeccion,
-                                item.codigo,
-                                item.nombre,
-                                regExistente.UrlLeccion
+                                regPdfEx.id || regPdfEx.IdLeccion,
+                                codigoPdf,
+                                nombreVisualPdf,
+                                regPdfEx.UrlLeccion
                             );
-                            regExistente.Codigo = item.codigo;
-                            regExistente.Nombre = item.nombre;
                         }
                         continue;
                     }
-                }
-                pendientes.push(item);
-            }
 
-            // 6. Si ya todo está guardado y preservado: SILENCIO TOTAL
-            if (pendientes.length === 0) {
-                yaProcesado = true;
-                return;
-            }
-
-            // 7. Procesar lecciones nuevas (SCORM y PDFs -> sube a Supabase y guarda link de Supabase; Genially -> guarda link directo)
-            let exitosCount = 0;
-            const erroresScorm = [];
-            const pdfsExtraDescubiertos = [];
-            const total = pendientes.length;
-
-            for (let i = 0; i < total; i++) {
-                const item = pendientes[i];
-                let urlFinal = item.url;
-                let codigoFinal = item.codigo || item.titulo;
-                let nombreFinal = item.nombre || codigoFinal;
-
-                if (esRecursoScorm(item.url)) {
-                    // Si es un mod/resource suelto fuera de .container-lesson, verificar primero a dónde salta
-                    if (item.requiereValidarSaltoPdf) {
+                    let pdfGuardado = false;
+                    for (let intPdf = 1; intPdf <= 3 && !pdfGuardado; intPdf++) {
                         try {
-                            const destino = await resolverDestinoRecurso(item.url);
-                            if (!destino || destino.tipo !== 'pdf') continue;
-
-                            const nomPdf = extraerNombreArchivoPdf(destino.url) || '';
-                            if (!REGEX_CODIGO_LECCION.test(nomPdf)) continue;
-
-                            const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
-                            const numPdf = extraerNumeroLeccion(codigoPdf);
-                            const nombreVisualPdf = (numPdf !== null && mapaGlobalPLeccion[String(numPdf)])
-                                ? mapaGlobalPLeccion[String(numPdf)]
-                                : (item.nombre && item.nombre !== item.codigo ? item.nombre : codigoPdf);
-
-                            const regPdfExistente = buscarExistentePorCodigoOUrl(existentes, codigoPdf, destino.url);
-                            if (regPdfExistente) {
-                                if (regPdfExistente.Codigo !== codigoPdf || regPdfExistente.Nombre !== nombreVisualPdf) {
-                                    await actualizarLeccion(
-                                        regPdfExistente.id || regPdfExistente.IdLeccion,
-                                        codigoPdf,
-                                        nombreVisualPdf,
-                                        regPdfExistente.UrlLeccion
-                                    );
-                                }
-                                continue;
-                            }
-
                             mostrarToast({
                                 tipo: 'info',
-                                mensaje: `Preservando PDF en Supabase: ${codigoPdf}...`,
+                                mensaje: `Preservando PDF en Supabase: ${codigoPdf}${intPdf > 1 ? ` [reintento ${intPdf}]` : ''}...`,
                                 duracionMs: 0
                             });
-
-                            const resPdf = await preservarPdfEnSupabase(idModulo, codigoPdf, destino.url, destino.blob || null);
-                            codigoFinal = resPdf.tituloFinal || codigoPdf;
-                            nombreFinal = nombreVisualPdf;
-                            urlFinal = resPdf.urlPublica;
-                        } catch {
-                            continue;
-                        }
-                    } else {
-                        mostrarToast({
-                            tipo: 'info',
-                            mensaje: `Preservando en Supabase (${i + 1}/${total}): ${codigoFinal}...`,
-                            duracionMs: 0
-                        });
-
-                        try {
-                            const resPreservado = await preservarScormEnSupabase(idModulo, codigoFinal, item.url, pdfsExtraDescubiertos);
-                            codigoFinal = resPreservado.tituloFinal || codigoFinal;
-                            const numRes = extraerNumeroLeccion(codigoFinal) ?? item.numero;
-                            if (numRes !== null && numRes !== 999 && mapaGlobalPLeccion[String(numRes)]) {
-                                nombreFinal = mapaGlobalPLeccion[String(numRes)];
+                            const resPdf = await preservarPdfEnSupabase(idModulo, codigoPdf, urlPdfExtra, null);
+                            const codFinalPdf = resPdf.tituloFinal || codigoPdf;
+                            if (!yaExisteEnLista(existentes, codFinalPdf, resPdf.urlPublica)) {
+                                await crearLeccion(idModuloDb, codFinalPdf, nombreVisualPdf, resPdf.urlPublica);
+                                existentes.push({ Codigo: codFinalPdf, Nombre: nombreVisualPdf, UrlLeccion: resPdf.urlPublica });
+                                exitosCount++;
                             }
-                            urlFinal = resPreservado.urlPublica;
+                            pdfGuardado = true;
                         } catch (e) {
-                            console.error(`[UVEG Guardado] Error al subir "${codigoFinal}" a Supabase:`, e);
-                            erroresScorm.push(`${codigoFinal}: ${e.message}`);
-                            continue;
+                            console.warn(`[UVEG Guardado] Intento ${intPdf}/3 al preservar PDF interno "${codigoPdf}":`, e);
+                            if (intPdf < 3) await esperar(1000 * intPdf);
+                            else erroresFinales.push(`${codigoPdf}: ${e.message}`);
                         }
                     }
                 }
 
-                if (!yaExisteEnLista(existentes, codigoFinal, urlFinal)) {
-                    await crearLeccion(idModuloDb, codigoFinal, nombreFinal, urlFinal);
-                    existentes.push({ Codigo: codigoFinal, Nombre: nombreFinal, UrlLeccion: urlFinal });
-                    exitosCount++;
-                }
-            }
+                // Verificación real contra la base de datos al terminar la pasada
+                const verificacionBd = await obtenerLeccionesDeModulo(idModuloDb);
+                const faltantesEnBd = itemsUnicos.filter(it =>
+                    !it.noEsPdfLeccion &&
+                    !it.requiereValidarSaltoPdf &&
+                    !buscarExistentePorCodigoOUrl(verificacionBd, it.codigo, it.url)
+                );
 
-            // 7b. Si dentro de los archivos de un SCORM se detectaron saltos a PDFs de UVEG (como L3_Comic.pdf), preservarlos también
-            for (const urlPdfExtra of pdfsExtraDescubiertos) {
-                const nomPdf = extraerNombreArchivoPdf(urlPdfExtra) || 'Documento.pdf';
-                const codigoPdf = nomPdf.replace(/\.pdf$/i, '').trim();
-                const numPdf = extraerNumeroLeccion(codigoPdf);
-                const nombreVisualPdf = (numPdf !== null && mapaGlobalPLeccion[String(numPdf)])
-                    ? mapaGlobalPLeccion[String(numPdf)]
-                    : codigoPdf;
-
-                const regPdfEx = buscarExistentePorCodigoOUrl(existentes, codigoPdf, urlPdfExtra);
-                if (regPdfEx) {
-                    if (regPdfEx.Codigo !== codigoPdf || regPdfEx.Nombre !== nombreVisualPdf) {
-                        await actualizarLeccion(
-                            regPdfEx.id || regPdfEx.IdLeccion,
-                            codigoPdf,
-                            nombreVisualPdf,
-                            regPdfEx.UrlLeccion
-                        );
-                    }
-                    continue;
+                if (faltantesEnBd.length === 0 && erroresFinales.length === 0) {
+                    break;
                 }
 
-                try {
+                if (pasada < MAX_PASADAS) {
                     mostrarToast({
                         tipo: 'info',
-                        mensaje: `Preservando PDF en Supabase: ${codigoPdf}...`,
+                        mensaje: `Completando sincronización (${faltantesEnBd.length} pendiente${faltantesEnBd.length === 1 ? '' : 's'}, verificación ${pasada + 1}/${MAX_PASADAS})...`,
                         duracionMs: 0
                     });
-                    const resPdf = await preservarPdfEnSupabase(idModulo, codigoPdf, urlPdfExtra, null);
-                    const codFinalPdf = resPdf.tituloFinal || codigoPdf;
-                    if (!yaExisteEnLista(existentes, codFinalPdf, resPdf.urlPublica)) {
-                        await crearLeccion(idModuloDb, codFinalPdf, nombreVisualPdf, resPdf.urlPublica);
-                        existentes.push({ Codigo: codFinalPdf, Nombre: nombreVisualPdf, UrlLeccion: resPdf.urlPublica });
-                        exitosCount++;
-                    }
-                } catch (e) {
-                    console.warn(`[UVEG Guardado] Error al preservar PDF interno "${codigoPdf}":`, e);
+                    await esperar(1500);
                 }
             }
 
-            yaProcesado = true;
+            if (erroresFinales.length === 0) {
+                yaProcesado = true;
+            } else {
+                // Si tras las 3 pasadas aún quedó alguno pendiente por red, programar reintento automático sin requerir recargar la página
+                yaProcesado = false;
+                setTimeout(ejecutarSincronizacion, 4500);
+            }
 
             // 8. Notificación discreta de resultado
-            if (exitosCount > 0) {
+            if (exitosCount > 0 && erroresFinales.length === 0) {
                 mostrarToast({
                     tipo: 'success',
                     mensaje: `Se han preservado y sincronizado ${exitosCount} lecciones en Supabase`,
                     duracionMs: 8000
                 });
-            } else if (erroresScorm.length > 0) {
+            } else if (erroresFinales.length > 0) {
                 mostrarToast({
                     tipo: 'error',
-                    mensaje: `No se pudo preservar recurso (${erroresScorm[0]})`,
-                    duracionMs: 12000
+                    mensaje: `Reintentando recurso pendiente (${erroresFinales[0]})`,
+                    duracionMs: 8000
                 });
             }
         } catch (error) {
