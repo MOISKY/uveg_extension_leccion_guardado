@@ -39,6 +39,7 @@
     }
 
     const HOSTS_GENIALLY = ['view.genial.ly', 'view.genially.com', 'genial.ly', 'genially.com'];
+    const HOSTS_YOUTUBE = ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'youtube-nocookie.com', 'www.youtube-nocookie.com'];
     const ID_HOST = 'uveg-guardado-notif-host';
     const SIN_TITULO = '(sin título)';
     const REGEX_CODIGO_LECCION = /(?:LEC[_-]?L|[A-Z0-9]+_L|_L|L[_-]|LECCION[_-]?\s*|\bL)[_-]?0*(\d+)(?!\d)/i;
@@ -125,9 +126,241 @@
 
     // --- NORMALIZACIÓN PARA DEDUPLICACIÓN EXACTA ---
 
+    function normalizarTextoSimple(txt) {
+        if (!txt) return '';
+        return String(txt)
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function obtenerNombreDesdeDisposition(disposition) {
+        if (!disposition) return null;
+        const mUtf = disposition.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\r\n]+)/i);
+        if (mUtf && mUtf[1]) {
+            try { return decodeURIComponent(mUtf[1].trim().replace(/^["']|["']$/g, '')); } catch {}
+        }
+        const mStd = disposition.match(/filename\s*=\s*["']?([^"';\r\n]+)["']?/i);
+        if (mStd && mStd[1]) {
+            return mStd[1].trim();
+        }
+        return null;
+    }
+
+    function base64ToBlob(b64, contentType = 'application/octet-stream') {
+        const bin = atob(b64 || '');
+        const len = bin.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = bin.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: contentType || 'application/octet-stream' });
+    }
+
+    function fetchPorBackground(url, asBase64 = false) {
+        return new Promise((resolve, reject) => {
+            if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.sendMessage) {
+                reject(new Error('Background fetch no disponible'));
+                return;
+            }
+            chrome.runtime.sendMessage(
+                { type: 'UVEG_FETCH_RESOURCE', url, asBase64 },
+                (resp) => {
+                    if (chrome.runtime.lastError) {
+                        reject(new Error(chrome.runtime.lastError.message));
+                        return;
+                    }
+                    if (!resp || !resp.ok) {
+                        reject(new Error((resp && resp.error) || `HTTP ${(resp && resp.status) || 0}`));
+                        return;
+                    }
+                    resolve(resp);
+                }
+            );
+        });
+    }
+
+    async function fetchSeguroRecurso(url, asBase64 = false) {
+        let esCrossOrigin = false;
+        try {
+            const u = new URL(url, window.location.href);
+            esCrossOrigin = u.origin !== window.location.origin;
+        } catch {}
+
+        if (esCrossOrigin && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+            const respBg = await fetchPorBackground(url, asBase64);
+            const blob = respBg.isBase64 ? base64ToBlob(respBg.body, respBg.contentType) : null;
+            const text = !respBg.isBase64 ? (respBg.body || '') : null;
+            return {
+                ok: true,
+                finalUrl: respBg.finalUrl || url,
+                contentType: respBg.contentType || '',
+                contentDisposition: respBg.contentDisposition || '',
+                blob,
+                text
+            };
+        }
+
+        try {
+            const res = await fetchConReintento(url, { credentials: 'include' }, 2, 450);
+            const finalUrl = res.url || url;
+            const contentType = res.headers.get('content-type') || '';
+            const contentDisposition = res.headers.get('content-disposition') || '';
+            const cTypeLow = contentType.toLowerCase();
+            const esTextoHtml = cTypeLow.includes('text/html') || cTypeLow.includes('application/json') || cTypeLow.includes('text/plain');
+            const esBinario = asBase64 ||
+                (!esTextoHtml && (
+                    cTypeLow.includes('application/pdf') ||
+                    cTypeLow.includes('octet-stream') ||
+                    /\.pdf(?:[?#]|$)/i.test(finalUrl)
+                ));
+
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+
+            if (esBinario) {
+                const blob = await res.blob();
+                return { ok: true, finalUrl, contentType, contentDisposition, blob, text: null };
+            }
+            const text = await res.text();
+            return { ok: true, finalUrl, contentType, contentDisposition, blob: null, text };
+        } catch (errDirecto) {
+            if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+                const respBg = await fetchPorBackground(url, asBase64);
+                const blob = respBg.isBase64 ? base64ToBlob(respBg.body, respBg.contentType) : null;
+                const text = !respBg.isBase64 ? (respBg.body || '') : null;
+                return {
+                    ok: true,
+                    finalUrl: respBg.finalUrl || url,
+                    contentType: respBg.contentType || '',
+                    contentDisposition: respBg.contentDisposition || '',
+                    blob,
+                    text
+                };
+            }
+            throw errDirecto;
+        }
+    }
+
+    function extraerGoogleDriveId(urlStr) {
+        if (!urlStr) return null;
+        try {
+            const u = new URL(urlStr, window.location.href);
+            const h = u.hostname.toLowerCase();
+            if (h !== 'drive.google.com' && h !== 'docs.google.com' && h !== 'drive.usercontent.google.com') {
+                return null;
+            }
+            const mPath = u.pathname.match(/\/(?:file|document|presentation|spreadsheets)\/d\/([a-zA-Z0-9_-]{15,})/i);
+            if (mPath && mPath[1]) return mPath[1];
+            const qId = u.searchParams.get('id');
+            if (qId && /^[a-zA-Z0-9_-]{15,}$/.test(qId)) return qId;
+        } catch {}
+        return null;
+    }
+
+    function esUrlGoogleDrive(urlStr) {
+        return Boolean(extraerGoogleDriveId(urlStr));
+    }
+
+    function construirUrlDrivePreview(fileId) {
+        return `https://drive.google.com/file/d/${fileId}/preview`;
+    }
+
+    function construirUrlDriveDownload(fileId) {
+        return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+    }
+
+    function extraerYoutubeId(urlStr) {
+        if (!urlStr) return null;
+        try {
+            const u = new URL(urlStr, window.location.href);
+            const h = u.hostname.toLowerCase();
+            const esYtHost = HOSTS_YOUTUBE.some(base => h === base || h.endsWith('.' + base));
+            if (!esYtHost) return null;
+
+            let cand = null;
+            if (h === 'youtu.be' || h.endsWith('.youtu.be')) {
+                cand = u.pathname.split('/').filter(Boolean)[0] || null;
+            } else {
+                const vParam = u.searchParams.get('v') || u.searchParams.get('vi');
+                if (vParam) {
+                    cand = vParam;
+                } else {
+                    const mPath = u.pathname.match(/\/(?:embed|shorts|v|live)\/([a-zA-Z0-9_-]{11})(?:[/?#]|$)/i);
+                    if (mPath) cand = mPath[1];
+                }
+            }
+            if (cand && /^[a-zA-Z0-9_-]{11}$/.test(cand)) {
+                return cand;
+            }
+        } catch {
+            const m = String(urlStr).match(/(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:[^"'\s#]*&)?v=|embed\/|shorts\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})(?:[?&#/]|$)/i);
+            if (m && /^[a-zA-Z0-9_-]{11}$/.test(m[1])) return m[1];
+        }
+        return null;
+    }
+
+    function esUrlYoutube(urlStr) {
+        return Boolean(extraerYoutubeId(urlStr));
+    }
+
+    function construirUrlYoutubeEmbed(urlOrId) {
+        const id = /^[a-zA-Z0-9_-]{11}$/.test(String(urlOrId || ''))
+            ? String(urlOrId)
+            : extraerYoutubeId(urlOrId);
+        return id ? `https://www.youtube.com/embed/${id}` : urlOrId;
+    }
+
+    function esUrlEnlacesUveg(urlStr) {
+        if (!urlStr) return false;
+        try {
+            const u = new URL(urlStr, window.location.href);
+            return u.hostname.toLowerCase() === 'enlaces.uveg.edu.mx' &&
+                   u.pathname.toLowerCase().includes('/enlaces');
+        } catch {
+            return /enlaces\.uveg\.edu\.mx\/enlaces/i.test(String(urlStr));
+        }
+    }
+
+    function esUrlEstenografica(urlStr, textoEnlace = '') {
+        if (!esUrlEnlacesUveg(urlStr)) return false;
+        if (textoEnlace) {
+            const txtNorm = normalizarTextoSimple(textoEnlace);
+            return /estenograf|transcrip/.test(txtNorm);
+        }
+        return /[?&]token=/i.test(String(urlStr));
+    }
+
+    function esUrlActividadMoodleContenedor(urlStr) {
+        if (!urlStr) return false;
+        try {
+            const u = new URL(urlStr, window.location.href);
+            const h = u.hostname.toLowerCase();
+            const p = u.pathname.toLowerCase();
+            if (!h.endsWith('uveg.edu.mx')) return false;
+            if (/action=|edit/i.test(u.search) || p.includes('modedit.php')) return false;
+            return /\/mod\/(?:page|hvp|lesson|book|url)\/(?:view|embed)\.php$/i.test(p);
+        } catch {
+            return false;
+        }
+    }
+
     function normalizarUrl(urlStr) {
         if (!urlStr) return '';
         try {
+            const ytId = extraerYoutubeId(urlStr);
+            if (ytId) {
+                return `https://www.youtube.com/embed/${ytId}`;
+            }
+
+            const driveId = extraerGoogleDriveId(urlStr);
+            if (driveId) {
+                return `https://drive.google.com/file/d/${driveId}/view`;
+            }
+
             let u = new URL(urlStr, window.location.href);
             let h = u.hostname.toLowerCase();
             if (HOSTS_GENIALLY.some(base => h === base || h.endsWith('.' + base))) {
@@ -137,6 +370,9 @@
             const matchIdGenially = p.match(/([a-f0-9]{24})/i);
             if (matchIdGenially) {
                 return `https://view.genial.ly/${matchIdGenially[1].toLowerCase()}`;
+            }
+            if (h === 'enlaces.uveg.edu.mx' && u.searchParams && u.searchParams.has('token')) {
+                return `${u.protocol}//${h}${p.toLowerCase()}?token=${u.searchParams.get('token')}`;
             }
             if (u.searchParams && u.searchParams.has('id')) {
                 return `${u.protocol}//${h}${p}?id=${u.searchParams.get('id')}`.toLowerCase();
@@ -168,24 +404,36 @@
             try { localStorage.setItem(STORAGE_KEY_MODULO, idLimpio); } catch {}
             return idLimpio;
         }
-        if (urlId && urlId.trim()) {
-            return urlId.trim();
-        }
+        try {
+            const linkCurso = document.querySelector('a[href*="/course/view.php?id="]');
+            if (linkCurso) {
+                const mCurso = (linkCurso.getAttribute('href') || '').match(/[?&]id=(\d+)/i);
+                if (mCurso && mCurso[1]) {
+                    try { localStorage.setItem(STORAGE_KEY_MODULO, mCurso[1]); } catch {}
+                    return mCurso[1];
+                }
+            }
+        } catch {}
         try {
             const guardado = localStorage.getItem(STORAGE_KEY_MODULO);
             if (guardado && guardado.trim()) return guardado.trim();
         } catch {}
+        if (urlId && urlId.trim()) {
+            return urlId.trim();
+        }
         return '324';
     }
 
     function obtenerNombreModuloH1(doc = document, idModuloFallback = '') {
         try {
-            const h1 = doc.querySelector('h1');
-            if (h1) {
-                const txt = (h1.innerText || h1.textContent || '').replace(/\s+/g, ' ').trim();
-                if (txt.length > 1 && !/^(campus virtual|uveg)$/i.test(txt)) {
-                    try { localStorage.setItem(STORAGE_KEY_MODULO_NOMBRE, txt); } catch {}
-                    return txt;
+            if (/\/course\/view\.php/i.test(window.location.pathname) || hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+                const h1 = doc.querySelector('h1');
+                if (h1) {
+                    const txt = (h1.innerText || h1.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (txt.length > 1 && !/^(campus virtual|uveg)$/i.test(txt)) {
+                        try { localStorage.setItem(STORAGE_KEY_MODULO_NOMBRE, txt); } catch {}
+                        return txt;
+                    }
                 }
             }
         } catch {}
@@ -210,6 +458,9 @@
     function esUrlRecurso(urlStr) {
         if (!urlStr) return false;
         if (esUrlGenially(urlStr)) return true;
+        if (esUrlYoutube(urlStr)) return true;
+        if (esUrlGoogleDrive(urlStr)) return true;
+        if (esUrlEstenografica(urlStr)) return true;
         try {
             const url = new URL(urlStr, window.location.href);
             const h = url.hostname.toLowerCase();
@@ -227,14 +478,16 @@
 
     function esRecursoScorm(urlStr) {
         if (!urlStr) return false;
+        if (esUrlYoutube(urlStr) || esUrlGenially(urlStr)) return false;
         const u = urlStr.toLowerCase();
-        if (HOSTS_GENIALLY.some(base => u.includes(base))) return false;
         return u.includes('/mod/scorm/') ||
                u.includes('/mod_scorm/') ||
                u.includes('/mod/resource/') ||
                u.includes('/mod_resource/') ||
                u.includes('scoid=') ||
                u.includes('story.html') ||
+               esUrlGoogleDrive(urlStr) ||
+               esUrlEstenografica(urlStr) ||
                esUrlPdfDirecto(urlStr);
     }
 
@@ -262,6 +515,21 @@
         } catch {}
     }
 
+    const REGEX_GENERICO_TITULO = /^(genially|view|iframe|embedded|youtube(\s+video\s+player)?|reproductor(\s+de\s+video)?(\s+de)?\s+youtube)$/i;
+
+    function limpiarTextoElemento(el) {
+        if (!el) return '';
+        try {
+            const copia = el.cloneNode(true);
+            if (copia.querySelectorAll) {
+                copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
+            }
+            return (copia.innerText || copia.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
+        } catch {
+            return (el.innerText || el.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
+        }
+    }
+
     function extraerMapaPLeccionDeDocumento(doc = document, idModulo = '') {
         const mapa = cargarMapaPLeccion(idModulo);
         if (!doc || !doc.querySelectorAll) return mapa;
@@ -281,23 +549,69 @@
                     mapa[String(num)] = txt;
                 }
             }
+
+            const scope = doc.querySelector('#region-main, .course-content, [role="main"]') || doc;
+            const encabezados = scope.querySelectorAll('h1, h2, h3, h4');
+            for (const h of encabezados) {
+                if (h.closest && h.closest('nav, header, footer, #page-header, .breadcrumb, [data-region="drawer"]')) continue;
+                const txt = limpiarTextoElemento(h);
+                if (!txt || txt.length < 4 || /^(recursos|tiempo estimado)/i.test(txt)) continue;
+                const num = extraerNumeroLeccion(txt);
+                if (num !== null && num !== 999 && !mapa[String(num)]) {
+                    mapa[String(num)] = txt;
+                }
+            }
+
             guardarMapaPLeccion(idModulo, mapa);
         } catch {}
 
         return mapa;
     }
 
+    function obtenerEncabezadoLeccionPrecedente(el, doc = document) {
+        if (!el || !doc) return '';
+        try {
+            const scope = (el.closest && el.closest('#region-main, .course-content, [role="main"], .box')) || doc.querySelector('#region-main, [role="main"]') || doc;
+            if (!scope || !scope.querySelectorAll) return '';
+
+            const candidatos = Array.from(scope.querySelectorAll('h1, h2, h3, h4, p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]'));
+            let ultimoNumerado = '';
+            let ultimoGenerico = '';
+
+            for (const h of candidatos) {
+                if (h.closest && h.closest('nav, header, footer, #page-header, .breadcrumb, [data-region="drawer"]')) continue;
+                if (h === el) break;
+                const rel = h.compareDocumentPosition ? h.compareDocumentPosition(el) : 0;
+                const estaAntes = Boolean(rel & Node.DOCUMENT_POSITION_FOLLOWING);
+                if (!estaAntes) continue;
+
+                const txt = limpiarTextoElemento(h);
+                if (!txt || txt.length < 3 || /^(recursos|tiempo estimado|evaluaci[oó]n|actividades)/i.test(txt)) continue;
+
+                if (REGEX_CODIGO_LECCION.test(txt) || REGEX_NUMERO_PLECCION.test(txt)) {
+                    ultimoNumerado = txt;
+                } else if (/^H[1-3]$/i.test(h.tagName)) {
+                    ultimoGenerico = txt;
+                }
+            }
+
+            return ultimoNumerado || ultimoGenerico || '';
+        } catch {
+            return '';
+        }
+    }
+
     function obtenerNombrePLeccion(el, doc, contenedorExplicito, numLeccion, codigoFallback, mapaPLeccion = {}) {
         try {
             const contenedor = contenedorExplicito || (el && el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null);
             if (contenedor && contenedor.querySelectorAll) {
-                const pList = contenedor.querySelectorAll('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
+                const pList = contenedor.querySelectorAll('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"], h2, h3');
                 if (pList.length === 1) {
-                    const txt = (pList[0].innerText || pList[0].textContent || '').replace(/\s+/g, ' ').trim();
+                    const txt = limpiarTextoElemento(pList[0]);
                     if (txt.length > 2) return txt;
                 } else if (pList.length > 1 && numLeccion !== null && numLeccion !== 999) {
                     for (const p of pList) {
-                        const txt = (p.innerText || p.textContent || '').replace(/\s+/g, ' ').trim();
+                        const txt = limpiarTextoElemento(p);
                         if (extraerNumeroLeccion(txt) === numLeccion) return txt;
                     }
                 }
@@ -318,11 +632,14 @@
                 if (sec && sec.querySelector) {
                     const pCercano = sec.querySelector('p.leccion2-pLeccion, .leccion2-pLeccion, [class*="pLeccion"]');
                     if (pCercano) {
-                        const txt = (pCercano.innerText || pCercano.textContent || '').replace(/\s+/g, ' ').trim();
+                        const txt = limpiarTextoElemento(pCercano);
                         if (txt.length > 2) return txt;
                     }
                 }
             }
+
+            const encPrecedente = obtenerEncabezadoLeccionPrecedente(el, doc);
+            if (encPrecedente) return encPrecedente;
         } catch {}
 
         return codigoFallback || SIN_TITULO;
@@ -352,8 +669,8 @@
         const ariaAttr = (iframe.getAttribute('aria-label') || '').trim();
         const nameAttr = (iframe.getAttribute('name') || '').trim();
 
-        if (titleAttr && !/^(genially|view|iframe|embedded)$/i.test(titleAttr)) return titleAttr;
-        if (ariaAttr && !/^(genially|view|iframe|embedded)$/i.test(ariaAttr)) return ariaAttr;
+        if (titleAttr && !REGEX_GENERICO_TITULO.test(titleAttr)) return titleAttr;
+        if (ariaAttr && !REGEX_GENERICO_TITULO.test(ariaAttr)) return ariaAttr;
 
         const idContenedor = extraerIdContenedorLeccion(iframe);
         if (idContenedor) return idContenedor;
@@ -363,14 +680,17 @@
             if (actividad) {
                 const header = actividad.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
                 if (header) {
-                    const textoLimpio = (header.innerText || header.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
-                    if (textoLimpio.length > 2) return textoLimpio;
+                    const textoLimpio = limpiarTextoElemento(header);
+                    if (textoLimpio.length > 2 && !/^(recursos|tiempo estimado)/i.test(textoLimpio)) return textoLimpio;
                 }
             }
         } catch {}
 
-        if (titleAttr) return titleAttr;
-        if (nameAttr) return nameAttr;
+        const encPrecedente = obtenerEncabezadoLeccionPrecedente(iframe, contextDoc);
+        if (encPrecedente) return encPrecedente;
+
+        if (titleAttr && !REGEX_GENERICO_TITULO.test(titleAttr)) return titleAttr;
+        if (nameAttr && !REGEX_GENERICO_TITULO.test(nameAttr)) return nameAttr;
         return SIN_TITULO;
     }
 
@@ -404,6 +724,11 @@
                 }
             }
 
+            const encPrecedente = obtenerEncabezadoLeccionPrecedente(el, contextDoc);
+            if (encPrecedente) {
+                return encPrecedente;
+            }
+
             if (contenedor) {
                 const tituloUveg = contenedor.querySelector('.titulo, .title, .nombre-leccion');
                 if (tituloUveg) {
@@ -415,9 +740,7 @@
 
                 const header = contenedor.querySelector('.instancename, .activityname, h2, h3, h4, .mod-indent-outer');
                 if (header) {
-                    const copia = header.cloneNode(true);
-                    copia.querySelectorAll('.accesshide, .sr-only').forEach(s => s.remove());
-                    const txt = (copia.innerText || copia.textContent || '').split('\n')[0].replace(/\s+/g, ' ').trim();
+                    const txt = limpiarTextoElemento(header);
                     if (txt.length > 2 && !/^(recursos|tiempo estimado)/i.test(txt)) {
                         return txt;
                     }
@@ -425,7 +748,7 @@
             }
 
             const titleAttr = (el.getAttribute('title') || el.getAttribute('aria-label') || el.getAttribute('alt') || '').trim();
-            if (titleAttr && !/^(genially|view|iframe|embedded|icono|imagen|recurso)$/i.test(titleAttr)) {
+            if (titleAttr && !REGEX_GENERICO_TITULO.test(titleAttr) && !/^(icono|imagen|recurso)$/i.test(titleAttr)) {
                 return titleAttr.replace(/\s+/g, ' ');
             }
         } catch {}
@@ -492,17 +815,109 @@
         return null;
     }
 
-    function encontrarLeccionesEnDocumento(doc = document) {
+    function extraerUrlsYoutubeDeTexto(texto) {
+        if (!texto) return [];
+        const limpio = normalizarHtmlScorm(texto);
+        const regexYt = /https?:\/\/(?:www\.|m\.)?(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:[^"'\s<>\\#]*&)?v=|embed\/|shorts\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})(?:[^"'\s<>\\]*)?/gi;
+        const ids = new Set();
+        let m;
+        while ((m = regexYt.exec(limpio)) !== null) {
+            if (m[1] && /^[a-zA-Z0-9_-]{11}$/.test(m[1])) {
+                ids.add(m[1]);
+            }
+        }
+        return Array.from(ids);
+    }
+
+    function obtenerTituloBaseDocumentoMoodle(doc, contextoFallback = null) {
+        if (contextoFallback && (contextoFallback.nombre || contextoFallback.titulo || contextoFallback.codigo)) {
+            const nom = contextoFallback.nombre || contextoFallback.titulo || contextoFallback.codigo;
+            if (nom && nom !== SIN_TITULO) return nom;
+        }
+        try {
+            const scope = doc.querySelector('#region-main, [role="main"], .course-content') || doc;
+            for (const sel of ['h2', 'h3', '.page-header-headings h1', 'h1']) {
+                for (const h of scope.querySelectorAll(sel)) {
+                    if (h.closest && h.closest('nav, header, footer, #page-header, .breadcrumb, [data-region="drawer"]')) continue;
+                    const txt = limpiarTextoElemento(h);
+                    if (!txt || txt.length < 3 || /^(campus virtual|uveg|recursos|tiempo estimado)$/i.test(txt)) continue;
+                    if (REGEX_CODIGO_LECCION.test(txt) || REGEX_NUMERO_PLECCION.test(txt)) {
+                        return txt;
+                    }
+                }
+            }
+            const primerH2 = scope.querySelector('h2, h3');
+            if (primerH2) {
+                const txt = limpiarTextoElemento(primerH2);
+                if (txt.length > 2 && !/^(recursos|tiempo estimado)$/i.test(txt)) return txt;
+            }
+        } catch {}
+        return SIN_TITULO;
+    }
+
+    function recolectarActividadesMoodleEnDocumento(doc = document) {
+        const actividades = [];
+        const vistosAct = new Set();
+        if (!doc || !doc.querySelectorAll) return actividades;
+
+        try {
+            const scope = doc.querySelector('#region-main, .course-content, [role="main"]') || doc.body || doc;
+            const elementos = scope.querySelectorAll('a[href], [data-link], iframe[src], iframe[data-src]');
+
+            for (const el of elementos) {
+                if (el.closest && el.closest('nav, header, footer, #page-header, .breadcrumb, [data-region="drawer"], .course-navigation, .activity-navigation')) {
+                    continue;
+                }
+                const raw = el.getAttribute('href') || el.getAttribute('data-link') || el.getAttribute('src') || el.getAttribute('data-src');
+                if (!raw || !esUrlActividadMoodleContenedor(raw)) continue;
+
+                let absUrl = raw;
+                try { absUrl = new URL(raw, window.location.href).href; } catch {}
+
+                const norm = normalizarUrl(absUrl);
+                if (vistosAct.has(norm)) continue;
+                vistosAct.add(norm);
+
+                const contPadre = el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"], .activity, .activityinstance, .contentitem, li.section, .box') : null;
+                let codigo = extraerCodigoElemento(el, doc, contPadre, absUrl);
+                if (codigo === SIN_TITULO) {
+                    const txtEl = limpiarTextoElemento(el);
+                    if (txtEl && txtEl.length > 2 && !/^(entrar|abrir|ver|clic|aqui|aquí)$/i.test(txtEl)) {
+                        codigo = txtEl;
+                    }
+                }
+                const enc = obtenerEncabezadoLeccionPrecedente(el, doc);
+                const num = extraerNumeroLeccion(codigo) ?? extraerNumeroLeccion(enc) ?? (contPadre ? extraerNumeroLeccion(contPadre.id) : null);
+                const titulo = (enc && (REGEX_CODIGO_LECCION.test(enc) || REGEX_NUMERO_PLECCION.test(enc)))
+                    ? enc
+                    : (codigo !== SIN_TITULO ? codigo : obtenerTituloBaseDocumentoMoodle(doc));
+
+                actividades.push({
+                    url: absUrl,
+                    codigo: codigo,
+                    nombre: titulo,
+                    titulo: titulo,
+                    numero: num
+                });
+            }
+        } catch {}
+
+        return actividades;
+    }
+
+    function encontrarLeccionesEnDocumento(doc = document, contextoFallback = null, estenograficasGlobales = null) {
         const vistos = new Set();
         const encontrados = [];
         const contenedoresConGenially = new Set();
         const numerosConGenially = new Set();
+        const estenograficasPorLeccion = estenograficasGlobales || new Set();
         const idModuloActual = obtenerIdModulo();
 
         if (doc === document) {
             obtenerNombreModuloH1(doc, idModuloActual);
         }
         const mapaPLeccion = extraerMapaPLeccionDeDocumento(doc, idModuloActual);
+        const tituloDocFallback = obtenerTituloBaseDocumentoMoodle(doc, contextoFallback);
 
         // 0. Si el navegador dio un salto directo a un archivo PDF de UVEG (ej. .../pluginfile.php/8852/mod_resource/content/5/L3_Comic.pdf)
         if (doc === document && esUrlPdfDirecto(window.location.href)) {
@@ -522,15 +937,45 @@
             }];
         }
 
-        // 1. Rastreo de Iframes de Genially (ej. CPFI_L4, CPFI_L6, CPFI_L8, CPFI_L9, CPFI_L12)
+        // 1. Rastreo de Iframes de Genially y YouTube (y sub-iframes del mismo origen como H5P embed)
         for (const iframe of doc.querySelectorAll('iframe')) {
             const rawSrc = iframe.getAttribute('src') || iframe.getAttribute('data-src') || iframe.src;
-            if (!rawSrc || !esUrlGenially(rawSrc)) continue;
+            if (!rawSrc) continue;
+
+            try {
+                if (doc === document && iframe.contentDocument && iframe.contentDocument.documentElement) {
+                    const encIframe = obtenerEncabezadoLeccionPrecedente(iframe, doc) || tituloDocFallback;
+                    const numIf = extraerNumeroLeccion(encIframe) ?? (contextoFallback ? contextoFallback.numero : null);
+                    const subItems = encontrarLeccionesEnDocumento(
+                        iframe.contentDocument,
+                        { nombre: encIframe, titulo: encIframe, codigo: encIframe, numero: numIf },
+                        estenograficasPorLeccion
+                    );
+                    for (const sub of subItems) {
+                        const subNorm = normalizarUrl(sub.url);
+                        if (!vistos.has(subNorm)) {
+                            vistos.add(subNorm);
+                            encontrados.push(sub);
+                        }
+                    }
+                }
+            } catch {}
+
+            const esGenially = esUrlGenially(rawSrc);
+            const ytId = extraerYoutubeId(rawSrc);
+            if (!esGenially && !ytId) continue;
 
             let src = rawSrc;
-            try { src = new URL(rawSrc, window.location.href).href; } catch {}
+            if (ytId) {
+                src = construirUrlYoutubeEmbed(ytId);
+            } else {
+                try { src = new URL(rawSrc, window.location.href).href; } catch {}
+            }
 
-            const codigo = extraerTitulo(iframe, doc);
+            let codigo = extraerTitulo(iframe, doc);
+            if ((!codigo || codigo === SIN_TITULO || REGEX_GENERICO_TITULO.test(codigo)) && tituloDocFallback !== SIN_TITULO) {
+                codigo = tituloDocFallback;
+            }
             if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const urlNorm = normalizarUrl(src);
@@ -540,26 +985,68 @@
             let numCont = null;
             const contPadre = iframe.closest ? iframe.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null;
             if (contPadre) {
-                contenedoresConGenially.add(contPadre);
+                if (esGenially) contenedoresConGenially.add(contPadre);
                 numCont = extraerNumeroLeccion(contPadre.id);
-                if (numCont !== null) numerosConGenially.add(numCont);
+                if (esGenially && numCont !== null) numerosConGenially.add(numCont);
             }
 
-            const numCodigo = extraerNumeroLeccion(codigo) ?? numCont;
-            if (numCodigo !== null) {
+            const numCodigo = extraerNumeroLeccion(codigo) ?? numCont ?? (contextoFallback ? contextoFallback.numero : null);
+            if (esGenially && numCodigo !== null) {
                 numerosConGenially.add(numCodigo);
             }
 
             const nombreVisual = obtenerNombrePLeccion(iframe, doc, contPadre, numCodigo, codigo, mapaPLeccion);
+            const nombreFinal = (!nombreVisual || nombreVisual === SIN_TITULO || REGEX_GENERICO_TITULO.test(nombreVisual))
+                ? (tituloDocFallback !== SIN_TITULO ? tituloDocFallback : codigo)
+                : nombreVisual;
+            const codigoFinal = ytId
+                ? (numCodigo !== null && numCodigo !== 999 ? `L${numCodigo}_Video` : `Video_${ytId}`)
+                : codigo;
 
             encontrados.push({
-                codigo: codigo,
-                nombre: nombreVisual,
-                titulo: codigo,
+                codigo: codigoFinal,
+                nombre: nombreFinal,
+                titulo: codigoFinal,
                 url: src,
-                numero: numCodigo !== null ? numCodigo : 999
+                numero: numCodigo !== null ? numCodigo : 999,
+                esYoutube: Boolean(ytId)
             });
         }
+
+        // 1b. Rastreo de YouTube incrustado en scripts H5P (H5PIntegration) u HTML de la lección
+        try {
+            const scripts = doc.querySelectorAll('script');
+            for (const scr of scripts) {
+                const contenido = scr.textContent || '';
+                if (!/youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(contenido)) continue;
+                if (!/H5PIntegration|H5P\.YouTube|interactiveVideo|jsonContent|video/i.test(contenido)) continue;
+
+                const idsScript = extraerUrlsYoutubeDeTexto(contenido);
+                for (const ytId of idsScript) {
+                    const urlEmbed = construirUrlYoutubeEmbed(ytId);
+                    const urlNorm = normalizarUrl(urlEmbed);
+                    if (vistos.has(urlNorm)) continue;
+                    vistos.add(urlNorm);
+
+                    const encScript = obtenerEncabezadoLeccionPrecedente(scr, doc);
+                    const tituloBase = (encScript && encScript !== SIN_TITULO) ? encScript : tituloDocFallback;
+                    const numYt = extraerNumeroLeccion(tituloBase) ?? (contextoFallback ? contextoFallback.numero : null);
+                    const nombreVisual = (numYt !== null && mapaPLeccion[String(numYt)])
+                        ? mapaPLeccion[String(numYt)]
+                        : (tituloBase !== SIN_TITULO ? tituloBase : `Video_${ytId}`);
+                    const codigoYt = (numYt !== null && numYt !== 999) ? `L${numYt}_Video` : `Video_${ytId}`;
+
+                    encontrados.push({
+                        codigo: codigoYt,
+                        nombre: nombreVisual,
+                        titulo: codigoYt,
+                        url: urlEmbed,
+                        numero: numYt !== null ? numYt : 999,
+                        esYoutube: true
+                    });
+                }
+            }
+        } catch {}
 
         // 2. Rastreo de contenedores de lección (.container-lesson, #LEC_L1..#LEC_L12) que NO están en Genially
         const contenedoresProcesados = new Set();
@@ -578,7 +1065,12 @@
             if (!infoEl) continue;
 
             let rawUrl = infoEl.rawAttr;
-            try { rawUrl = new URL(infoEl.rawAttr, window.location.href).href; } catch {}
+            const ytIdCont = extraerYoutubeId(rawUrl);
+            if (ytIdCont) {
+                rawUrl = construirUrlYoutubeEmbed(ytIdCont);
+            } else {
+                try { rawUrl = new URL(infoEl.rawAttr, window.location.href).href; } catch {}
+            }
 
             const codigo = extraerCodigoElemento(infoEl.el, doc, cont, rawUrl);
             if (!codigo || codigo === SIN_TITULO) continue;
@@ -590,18 +1082,20 @@
 
             const num = numLeccion !== null ? numLeccion : (extraerNumeroLeccion(codigo) ?? 999);
             const nombreVisual = obtenerNombrePLeccion(infoEl.el, doc, cont, num, codigo, mapaPLeccion);
+            const codFinal = ytIdCont && num !== 999 ? `L${num}_Video` : codigo;
 
             encontrados.push({
-                codigo: codigo,
+                codigo: codFinal,
                 nombre: nombreVisual,
-                titulo: codigo,
+                titulo: codFinal,
                 url: rawUrl,
                 numero: num,
-                esPdf: esUrlPdfDirecto(rawUrl)
+                esPdf: esUrlPdfDirecto(rawUrl),
+                esYoutube: Boolean(ytIdCont)
             });
         }
 
-        // 3. Respaldo para elementos .img-leccion, enlaces PDF de lección (ej. L3_Comic.pdf) o recursos mod/resource que den salto a PDF de lección
+        // 3. Respaldo para .img-leccion, PDFs (ej. L3_Comic.pdf), mod/resource, enlaces YouTube y enlaces de Versión estenográfica (1 por lección)
         const selectorRespaldo = [
             '.img-leccion[data-link]',
             '[data-link*="/mod/scorm/"]',
@@ -609,29 +1103,105 @@
             '[data-link*="/mod/resource/"]',
             '[data-link*="/mod_resource/"]',
             '[data-link*=".pdf"]',
+            '[data-link*="youtube.com"]',
+            '[data-link*="youtu.be"]',
+            '[data-link*="youtube-nocookie.com"]',
+            '[data-link*="enlaces.uveg.edu.mx"]',
             'a[href*="/mod/resource/"]',
             'a[href*="/mod_resource/"]',
-            'a[href*=".pdf"]'
+            'a[href*=".pdf"]',
+            'a[href*="youtube.com"]',
+            'a[href*="youtu.be"]',
+            'a[href*="youtube-nocookie.com"]',
+            'a[href*="enlaces.uveg.edu.mx/enlaces"]'
         ].join(', ');
 
         for (const el of doc.querySelectorAll(selectorRespaldo)) {
+            if (el.closest && el.closest('nav, header, footer, #page-header, .breadcrumb, [data-region="drawer"]')) {
+                continue;
+            }
             const padreCont = el.closest ? el.closest('.container-lesson, [id^="LEC_L"], [id^="lec_l"]') : null;
-            if (padreCont && contenedoresProcesados.has(padreCont)) continue;
+            const rawAttrCheck = el.getAttribute('data-link') || el.getAttribute('href');
+            if (padreCont && contenedoresProcesados.has(padreCont) && !esUrlYoutube(rawAttrCheck) && !esUrlEnlacesUveg(rawAttrCheck)) {
+                continue;
+            }
 
-            const rawAttr = el.getAttribute('data-link') || el.getAttribute('href');
-            if (!rawAttr || !esUrlRecurso(rawAttr)) continue;
+            const rawAttr = rawAttrCheck;
+            const textoEl = (el.innerText || el.textContent || el.getAttribute('title') || '').trim();
+            const esEsteno = esUrlEstenografica(rawAttr, textoEl);
+            const ytIdLink = extraerYoutubeId(rawAttr);
+
+            if (!rawAttr || (!esEsteno && !ytIdLink && !esUrlRecurso(rawAttr))) continue;
 
             let rawUrl = rawAttr;
-            try { rawUrl = new URL(rawAttr, window.location.href).href; } catch {}
+            if (ytIdLink) {
+                rawUrl = construirUrlYoutubeEmbed(ytIdLink);
+            } else {
+                try { rawUrl = new URL(rawAttr, window.location.href).href; } catch {}
+            }
 
             const urlNorm = normalizarUrl(rawUrl);
             if (vistos.has(urlNorm)) continue;
 
             let codigo = extraerCodigoElemento(el, doc, padreCont, rawUrl);
+            if ((!codigo || codigo === SIN_TITULO || REGEX_GENERICO_TITULO.test(codigo)) && tituloDocFallback !== SIN_TITULO) {
+                codigo = tituloDocFallback;
+            }
             if (/^(english|español|saltar|salir)/i.test(codigo.trim())) continue;
 
             const esPdfDirecto = esUrlPdfDirecto(rawUrl);
             const esModRes = /\/mod\/resource\/|\/mod_resource\//i.test(rawUrl);
+
+            if (esEsteno) {
+                const encEst = obtenerEncabezadoLeccionPrecedente(el, doc) || (codigo !== SIN_TITULO ? codigo : tituloDocFallback);
+                const numEst = extraerNumeroLeccion(encEst) ?? extraerNumeroLeccion(codigo) ?? (contextoFallback ? contextoFallback.numero : null);
+                const nomBase = (numEst !== null && mapaPLeccion[String(numEst)])
+                    ? mapaPLeccion[String(numEst)]
+                    : (encEst && encEst !== SIN_TITULO ? encEst : `Lección ${numEst || ''}`.trim());
+                const claveEst = (numEst !== null && numEst !== 999)
+                    ? `num_${numEst}`
+                    : `tit_${normalizarTextoSimple(nomBase)}`;
+
+                if (estenograficasPorLeccion.has(claveEst)) continue;
+                estenograficasPorLeccion.add(claveEst);
+                vistos.add(urlNorm);
+
+                const codigoEst = (numEst !== null && numEst !== 999) ? `L${numEst}_Estenografica` : 'Version_Estenografica';
+                const nombreEst = /versi[oó]n estenogr[aá]fica/i.test(nomBase)
+                    ? nomBase
+                    : `${nomBase} - Versión estenográfica`;
+
+                encontrados.push({
+                    codigo: codigoEst,
+                    nombre: nombreEst,
+                    titulo: codigoEst,
+                    url: rawUrl,
+                    numero: numEst !== null ? numEst : 999,
+                    esPdf: true,
+                    esEstenografica: true
+                });
+                continue;
+            }
+
+            if (ytIdLink) {
+                const encYt = obtenerEncabezadoLeccionPrecedente(el, doc) || (codigo !== SIN_TITULO ? codigo : tituloDocFallback);
+                const numYt = extraerNumeroLeccion(encYt) ?? extraerNumeroLeccion(codigo) ?? (contextoFallback ? contextoFallback.numero : null);
+                const nombreYt = (numYt !== null && mapaPLeccion[String(numYt)])
+                    ? mapaPLeccion[String(numYt)]
+                    : (encYt && encYt !== SIN_TITULO ? encYt : (textoEl || `Video_${ytIdLink}`));
+                const codigoYt = (numYt !== null && numYt !== 999) ? `L${numYt}_Video` : `Video_${ytIdLink}`;
+
+                vistos.add(urlNorm);
+                encontrados.push({
+                    codigo: codigoYt,
+                    nombre: nombreYt,
+                    titulo: codigoYt,
+                    url: rawUrl,
+                    numero: numYt !== null ? numYt : 999,
+                    esYoutube: true
+                });
+                continue;
+            }
 
             // Si es un recurso suelto fuera de .container-lesson:
             if (!padreCont) {
@@ -712,6 +1282,83 @@
         return fetch(url, opciones);
     }
 
+    async function resolverActividadesMoodle(actividadesPendientes, urlsVistas, estenograficasGlobales) {
+        const cola = [...actividadesPendientes];
+        const procesadas = new Set();
+
+        while (cola.length > 0) {
+            const act = cola.shift();
+            if (!act || !act.url) continue;
+            const normAct = normalizarUrl(act.url);
+            if (procesadas.has(normAct)) continue;
+            procesadas.add(normAct);
+
+            try {
+                const resp = await fetchConReintento(act.url, { credentials: 'include' }, 2, 450);
+                const finalUrl = resp.url || act.url;
+
+                const ytDirecto = extraerYoutubeId(finalUrl);
+                if (ytDirecto) {
+                    const urlEmbed = construirUrlYoutubeEmbed(ytDirecto);
+                    const normYt = normalizarUrl(urlEmbed);
+                    if (!urlsVistas.has(normYt)) {
+                        urlsVistas.add(normYt);
+                        const num = act.numero ?? extraerNumeroLeccion(act.nombre || act.codigo);
+                        const cod = (num !== null && num !== 999) ? `L${num}_Video` : `Video_${ytDirecto}`;
+                        itemsAcumulados.push({
+                            codigo: cod,
+                            nombre: act.nombre || cod,
+                            titulo: cod,
+                            url: urlEmbed,
+                            numero: num !== null ? num : 999,
+                            esYoutube: true
+                        });
+                    }
+                    continue;
+                }
+
+                if (!resp.ok) continue;
+                const html = await resp.text();
+                const docAct = new DOMParser().parseFromString(html, 'text/html');
+                const hallados = encontrarLeccionesEnDocumento(docAct, act, estenograficasGlobales);
+
+                for (const h of hallados) {
+                    const normH = normalizarUrl(h.url);
+                    if (!urlsVistas.has(normH)) {
+                        urlsVistas.add(normH);
+                        itemsAcumulados.push(h);
+                    }
+                }
+
+                // Seguir iframes H5P incrustados dentro de una página Moodle (/mod/hvp/embed.php)
+                if (!/\/mod\/hvp\//i.test(act.url)) {
+                    for (const subIframe of docAct.querySelectorAll('iframe[src*="/mod/hvp/"], iframe[data-src*="/mod/hvp/"]')) {
+                        const rawSub = subIframe.getAttribute('src') || subIframe.getAttribute('data-src');
+                        if (!rawSub) continue;
+                        let urlSub = rawSub;
+                        try { urlSub = new URL(rawSub, finalUrl).href; } catch {}
+                        const normSub = normalizarUrl(urlSub);
+                        if (!procesadas.has(normSub)) {
+                            const encSub = obtenerEncabezadoLeccionPrecedente(subIframe, docAct) || act.nombre || act.codigo;
+                            const numSub = extraerNumeroLeccion(encSub) ?? act.numero ?? null;
+                            cola.push({
+                                url: urlSub,
+                                codigo: encSub,
+                                nombre: encSub,
+                                titulo: encSub,
+                                numero: numSub
+                            });
+                        }
+                    }
+                }
+            } catch (errAct) {
+                console.warn('[UVEG Guardado] Error resolviendo actividad Moodle:', act.url, errAct);
+            }
+
+            await esperar(120);
+        }
+    }
+
     // Escaneo secuencial con reintentos de las secciones 2, 3 y 4 en el campus virtual UVEG (evita bloqueo de sesión PHP en Moodle)
     async function escanearTodasLasSecciones(courseId) {
         if (escaneandoSecciones || !courseId || hostname === 'localhost' || hostname === '127.0.0.1' || window.location.protocol === 'file:') {
@@ -723,6 +1370,15 @@
 
         try {
             const urlsVistas = new Set(itemsAcumulados.map(it => normalizarUrl(it.url)));
+            const estenograficasGlobales = new Set();
+            for (const it of itemsAcumulados) {
+                if (it.esEstenografica) {
+                    const cl = (it.numero && it.numero !== 999) ? `num_${it.numero}` : `tit_${normalizarTextoSimple(it.nombre || it.codigo)}`;
+                    estenograficasGlobales.add(cl);
+                }
+            }
+
+            const actividadesMoodle = [...recolectarActividadesMoodleEnDocumento(document)];
 
             for (const sec of seccionesAExplorar) {
                 const urlSeccion = `${window.location.origin}/course/view.php?id=${courseId}&mainsection=${sec}`;
@@ -735,8 +1391,13 @@
                             const html = await resp.text();
                             const parser = new DOMParser();
                             const docSec = parser.parseFromString(html, 'text/html');
-                            halladosEnSeccion = encontrarIframesEnDocumento(docSec);
-                            if (halladosEnSeccion.length > 0) {
+                            halladosEnSeccion = encontrarLeccionesEnDocumento(docSec, null, estenograficasGlobales);
+                            for (const act of recolectarActividadesMoodleEnDocumento(docSec)) {
+                                if (!actividadesMoodle.some(a => normalizarUrl(a.url) === normalizarUrl(act.url))) {
+                                    actividadesMoodle.push(act);
+                                }
+                            }
+                            if (halladosEnSeccion.length > 0 || actividadesMoodle.length > 0) {
                                 break;
                             }
                         }
@@ -758,6 +1419,10 @@
 
                 await esperar(150);
             }
+
+            if (actividadesMoodle.length > 0) {
+                await resolverActividadesMoodle(actividadesMoodle, urlsVistas, estenograficasGlobales);
+            }
         } catch (e) {
             console.warn('[UVEG Guardado] Error al escanear secciones remotas:', e);
         } finally {
@@ -770,9 +1435,12 @@
     function normalizarHtmlScorm(texto) {
         if (!texto) return '';
         let limpio = String(texto)
+            .replace(/\\\\u0026/gi, '&')
+            .replace(/\\\\u002f/gi, '/')
             .replace(/\\u0026/gi, '&')
             .replace(/\\u002f/gi, '/')
             .replace(/\\x26/gi, '&')
+            .replace(/\\\\\//g, '/')
             .replace(/\\\//g, '/')
             .replace(/\\"/g, '"')
             .replace(/&amp;/gi, '&');
@@ -1195,20 +1863,252 @@
         throw ultimoErr || new Error('Error al subir archivo a Supabase');
     }
 
-    async function preservarPdfEnSupabase(idModulo, tituloPreferido, urlPdf, blobPreCargado = null) {
-        let blob = blobPreCargado;
-        let urlFinal = urlPdf;
+    function detectarPdfPorBytes(blob) {
+        if (!blob || blob.size < 4 || !blob.slice) return Promise.resolve(false);
+        return blob.slice(0, 5).text().then(t => t.startsWith('%PDF-')).catch(() => false);
+    }
 
-        if (!blob) {
-            const res = await fetchConReintento(urlPdf, { credentials: 'include' }, 3, 550);
-            if (!res.ok) {
-                throw new Error(`Error al descargar PDF (${res.status})`);
+    function extraerDestinoDeHtmlAcortador(html, baseUrl) {
+        if (!html) return null;
+        try {
+            const docTmp = new DOMParser().parseFromString(html, 'text/html');
+            const metaRefresh = docTmp.querySelector('meta[http-equiv="refresh" i]');
+            const mMeta = metaRefresh && (metaRefresh.getAttribute('content') || '').match(/url\s*=\s*([^;\s"']+)/i);
+            if (mMeta && mMeta[1]) {
+                return new URL(mMeta[1], baseUrl).href;
             }
-            urlFinal = res.url || urlPdf;
-            blob = await res.blob();
+            const enlaceDirecto = docTmp.querySelector(
+                'a[href*="drive.google.com"], iframe[src*="drive.google.com"], ' +
+                'a[href*="youtube.com"], a[href*="youtu.be"], iframe[src*="youtube"], ' +
+                'a[href*="genial"], iframe[src*="genial"], ' +
+                'a[href*=".pdf"], iframe[src*=".pdf"], embed[src*=".pdf"], a[href*="pluginfile.php"]'
+            );
+            if (enlaceDirecto) {
+                const rawHref = enlaceDirecto.getAttribute('href') || enlaceDirecto.getAttribute('src');
+                if (rawHref) return new URL(rawHref, baseUrl).href;
+            }
+        } catch {}
+
+        const pdfEnHtml = extraerUrlPdfDesdeTexto(html, baseUrl);
+        if (pdfEnHtml) return pdfEnHtml;
+
+        const limpio = normalizarHtmlScorm(html);
+        const mDrive = limpio.match(/https?:\/\/(?:drive|docs)\.google\.com\/(?:file|document|presentation|spreadsheets)\/d\/[a-zA-Z0-9_-]{15,}[^"'\s<>\\]*/i) ||
+                       limpio.match(/https?:\/\/drive\.google\.com\/open\?id=[a-zA-Z0-9_-]{15,}[^"'\s<>\\]*/i);
+        if (mDrive) return mDrive[0];
+
+        const ytIds = extraerUrlsYoutubeDeTexto(limpio);
+        if (ytIds.length > 0) return construirUrlYoutubeEmbed(ytIds[0]);
+
+        const mRedir = limpio.match(/(?:window\.)?location(?:\.href)?\s*=\s*["']([^"']+)["']/i) ||
+                       limpio.match(/location\.replace\(\s*["']([^"']+)["']\s*\)/i);
+        if (mRedir && mRedir[1]) {
+            try { return new URL(mRedir[1], baseUrl).href; } catch {}
+        }
+        return null;
+    }
+
+    async function descargarPdfDeGoogleDrive(fileId) {
+        const urlDescarga = construirUrlDriveDownload(fileId);
+        let resp = await fetchSeguroRecurso(urlDescarga, false);
+        let cType = (resp.contentType || '').toLowerCase();
+        let esPdf = Boolean(resp.blob) && (cType.includes('application/pdf') || (await detectarPdfPorBytes(resp.blob)));
+
+        if (!esPdf) {
+            let html = resp.text;
+            if (!html && resp.blob) {
+                try { html = await resp.blob.text(); } catch {}
+            }
+            if (html) {
+                try {
+                    const docDrv = new DOMParser().parseFromString(html, 'text/html');
+                    const form = docDrv.querySelector('form#download-form, form[action*="download"], form[action*="uc"]');
+                    let urlConfirm = null;
+                    if (form && form.getAttribute('action')) {
+                        const actionUrl = new URL(form.getAttribute('action'), resp.finalUrl || urlDescarga);
+                        for (const inp of form.querySelectorAll('input[name]')) {
+                            actionUrl.searchParams.set(inp.getAttribute('name'), inp.value || inp.getAttribute('value') || '');
+                        }
+                        urlConfirm = actionUrl.href;
+                    } else {
+                        const linkConfirm = docDrv.querySelector('a[href*="confirm="], a[href*="drive.usercontent.google.com"]');
+                        if (linkConfirm && linkConfirm.getAttribute('href')) {
+                            urlConfirm = new URL(linkConfirm.getAttribute('href'), resp.finalUrl || urlDescarga).href;
+                        }
+                    }
+
+                    if (urlConfirm) {
+                        resp = await fetchSeguroRecurso(urlConfirm, true);
+                        cType = (resp.contentType || '').toLowerCase();
+                        esPdf = Boolean(resp.blob) && (cType.includes('application/pdf') || (await detectarPdfPorBytes(resp.blob)));
+                    }
+                } catch {}
+            }
         }
 
-        const nombreArchivo = extraerNombreArchivoPdf(urlFinal) || extraerNombreArchivoPdf(urlPdf) || 'documento.pdf';
+        if (esPdf && resp.blob) {
+            const nomDisp = obtenerNombreDesdeDisposition(resp.contentDisposition);
+            const nomUrl = extraerNombreArchivoPdf(resp.finalUrl);
+            return {
+                tipo: 'pdf',
+                url: resp.finalUrl || urlDescarga,
+                blob: resp.blob,
+                nombreArchivo: nomDisp || nomUrl || null
+            };
+        }
+
+        return {
+            noDescargablePdf: true,
+            previewUrl: construirUrlDrivePreview(fileId)
+        };
+    }
+
+    async function resolverEnlaceAcortadoUveg(url) {
+        let urlActual = url;
+        for (let salto = 0; salto < 2; salto++) {
+            const resp = await fetchSeguroRecurso(urlActual, false);
+            const cType = (resp.contentType || '').toLowerCase();
+            const nomDisp = obtenerNombreDesdeDisposition(resp.contentDisposition);
+            const nomUrl = extraerNombreArchivoPdf(resp.finalUrl);
+
+            if (resp.blob && (cType.includes('application/pdf') || esUrlPdfDirecto(resp.finalUrl) || (await detectarPdfPorBytes(resp.blob)))) {
+                return {
+                    urlDestino: resp.finalUrl || urlActual,
+                    blob: resp.blob,
+                    nombreArchivo: nomDisp || nomUrl || null
+                };
+            }
+
+            if (resp.finalUrl && !esUrlEnlacesUveg(resp.finalUrl)) {
+                return { urlDestino: resp.finalUrl };
+            }
+
+            let html = resp.text;
+            if (!html && resp.blob) {
+                try { html = await resp.blob.text(); } catch {}
+            }
+            const extraido = extraerDestinoDeHtmlAcortador(html, resp.finalUrl || urlActual);
+            if (extraido) {
+                if (!esUrlEnlacesUveg(extraido)) {
+                    return { urlDestino: extraido };
+                }
+                urlActual = extraido;
+                continue;
+            }
+            break;
+        }
+        return null;
+    }
+
+    async function resolverItemsEnlacesUveg(lista) {
+        if (!Array.isArray(lista) || lista.length === 0) return;
+        for (const item of lista) {
+            if (!item || !item.url || item._enlaceResuelto) continue;
+            if (!esUrlEnlacesUveg(item.url)) continue;
+
+            try {
+                const res = await resolverEnlaceAcortadoUveg(item.url);
+                if (res && res.urlDestino) {
+                    const ytId = extraerYoutubeId(res.urlDestino);
+                    if (ytId) {
+                        item.url = construirUrlYoutubeEmbed(ytId);
+                        item.esYoutube = true;
+                        item.esPdf = false;
+                    } else {
+                        item.url = res.urlDestino;
+                        if (esUrlGenially(res.urlDestino)) {
+                            item.esPdf = false;
+                        }
+                    }
+                    if (res.blob) {
+                        item._blobPreCargado = res.blob;
+                    }
+                    if (res.nombreArchivo) {
+                        item._nombreArchivoSugerido = res.nombreArchivo;
+                    }
+                }
+            } catch (e) {
+                console.warn('[UVEG Guardado] No se pudo resolver enlace UVEG:', item.url, e);
+            }
+            item._enlaceResuelto = true;
+        }
+    }
+
+    async function resolverDestinoEstenografica(url) {
+        const driveIdDirecto = extraerGoogleDriveId(url);
+        if (driveIdDirecto) {
+            return await descargarPdfDeGoogleDrive(driveIdDirecto);
+        }
+
+        const resuelto = await resolverEnlaceAcortadoUveg(url);
+        if (!resuelto) return null;
+
+        if (resuelto.blob) {
+            return {
+                tipo: 'pdf',
+                url: resuelto.urlDestino,
+                blob: resuelto.blob,
+                nombreArchivo: resuelto.nombreArchivo || null
+            };
+        }
+
+        const driveIdDestino = extraerGoogleDriveId(resuelto.urlDestino);
+        if (driveIdDestino) {
+            return await descargarPdfDeGoogleDrive(driveIdDestino);
+        }
+
+        const resp = await fetchSeguroRecurso(resuelto.urlDestino, true);
+        if (resp.blob && ((resp.contentType || '').toLowerCase().includes('application/pdf') || (await detectarPdfPorBytes(resp.blob)))) {
+            return {
+                tipo: 'pdf',
+                url: resp.finalUrl || resuelto.urlDestino,
+                blob: resp.blob,
+                nombreArchivo: obtenerNombreDesdeDisposition(resp.contentDisposition) || extraerNombreArchivoPdf(resp.finalUrl) || null
+            };
+        }
+        return null;
+    }
+
+    async function preservarPdfEnSupabase(idModulo, tituloPreferido, urlPdf, blobPreCargado = null, nombreArchivoSugerido = null) {
+        let blob = blobPreCargado;
+        let urlFinal = urlPdf;
+        let nombreDesdeResp = nombreArchivoSugerido;
+
+        if (!blob) {
+            if (esUrlGoogleDrive(urlFinal) || esUrlEstenografica(urlFinal)) {
+                const resEst = await resolverDestinoEstenografica(urlFinal);
+                if (!resEst) {
+                    throw new Error('No se pudo localizar el recurso derivado de versión estenográfica');
+                }
+                if (resEst.noDescargablePdf && resEst.previewUrl) {
+                    return {
+                        tituloFinal: (!tituloPreferido || tituloPreferido === SIN_TITULO) ? 'Documento_Drive' : tituloPreferido,
+                        nombreArchivo: nombreDesdeResp || 'documento_drive.pdf',
+                        urlPublica: resEst.previewUrl
+                    };
+                }
+                urlFinal = resEst.url || urlFinal;
+                nombreDesdeResp = nombreDesdeResp || resEst.nombreArchivo;
+                blob = resEst.blob || null;
+            }
+            if (!blob) {
+                const resp = await fetchSeguroRecurso(urlFinal, true);
+                urlFinal = resp.finalUrl || urlFinal;
+                nombreDesdeResp = nombreDesdeResp || obtenerNombreDesdeDisposition(resp.contentDisposition);
+                blob = resp.blob;
+                if (!blob) {
+                    throw new Error('La URL no devolvió un archivo PDF descargable');
+                }
+            }
+        }
+
+        const slugBaseTitulo = (tituloPreferido && tituloPreferido !== SIN_TITULO)
+            ? `${crearSlug(tituloPreferido)}.pdf`
+            : null;
+        let nombreArchivo = nombreDesdeResp || extraerNombreArchivoPdf(urlFinal) || extraerNombreArchivoPdf(urlPdf) || slugBaseTitulo || 'documento.pdf';
+        if (!/\.pdf$/i.test(nombreArchivo)) {
+            nombreArchivo = `${nombreArchivo}.pdf`;
+        }
         const nombreSinExt = nombreArchivo.replace(/\.pdf$/i, '').trim();
 
         const tituloFinal = (!tituloPreferido || tituloPreferido === SIN_TITULO || /^(tiempo estimado|recursos)/i.test(tituloPreferido))
@@ -1391,6 +2291,8 @@
 
     async function crearLeccion(idModulo, codigo, nombre, urlLeccion) {
         const url = `${API_BASE_URL}/lecciones`;
+        const codLimpio = String(codigo || SIN_TITULO).trim().substring(0, 100);
+        const nomLimpio = String(nombre || codigo || SIN_TITULO).trim().substring(0, 200);
         const resp = await fetchConReintento(url, {
             method: 'POST',
             headers: {
@@ -1399,13 +2301,13 @@
             },
             body: JSON.stringify({
                 IdModulo: idModulo,
-                Codigo: codigo || SIN_TITULO,
-                Nombre: nombre || codigo || SIN_TITULO,
+                Codigo: codLimpio,
+                Nombre: nomLimpio,
                 UrlLeccion: urlLeccion
             })
         }, 3, 500);
 
-        if (!resp.ok) throw new Error(`HTTP ${resp.status} al guardar lección "${codigo}".`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status} al guardar lección "${codLimpio}".`);
 
         return await resp.json();
     }
@@ -1413,6 +2315,8 @@
     async function actualizarLeccion(idLeccion, codigo, nombre, urlLeccion) {
         if (!idLeccion) return null;
         try {
+            const codLimpio = String(codigo || SIN_TITULO).trim().substring(0, 100);
+            const nomLimpio = String(nombre || codigo || SIN_TITULO).trim().substring(0, 200);
             const resp = await fetchConReintento(`${API_BASE_URL}/lecciones/${encodeURIComponent(idLeccion)}`, {
                 method: 'PUT',
                 headers: {
@@ -1420,8 +2324,8 @@
                     'Accept': 'application/json'
                 },
                 body: JSON.stringify({
-                    Codigo: codigo || SIN_TITULO,
-                    Nombre: nombre || codigo || SIN_TITULO,
+                    Codigo: codLimpio,
+                    Nombre: nomLimpio,
                     UrlLeccion: urlLeccion
                 })
             }, 3, 500);
@@ -1666,6 +2570,33 @@
                         codigoFinal = resPdf.tituloFinal || codigoPdf;
                         nombreFinal = nombreVisualPdf;
                         urlFinal = resPdf.urlPublica;
+                    } else if (item.esEstenografica) {
+                        mostrarToast({
+                            tipo: 'info',
+                            mensaje: `Preservando versión estenográfica (${idx}/${total}): ${codigoFinal}${intento > 1 ? ` [reintento ${intento}]` : ''}...`,
+                            duracionMs: 0
+                        });
+
+                        const resEst = await preservarPdfEnSupabase(
+                            idModulo,
+                            codigoFinal,
+                            item.url,
+                            item._blobPreCargado || null,
+                            item._nombreArchivoSugerido || `${crearSlug(codigoFinal)}.pdf`
+                        );
+                        codigoFinal = item.codigo || resEst.tituloFinal || codigoFinal;
+                        nombreFinal = item.nombre || nombreFinal;
+                        urlFinal = resEst.urlPublica;
+                    } else if (esUrlPdfDirecto(item.url)) {
+                        mostrarToast({
+                            tipo: 'info',
+                            mensaje: `Preservando PDF en Supabase (${idx}/${total}): ${codigoFinal}${intento > 1 ? ` [reintento ${intento}]` : ''}...`,
+                            duracionMs: 0
+                        });
+
+                        const resPdfDirect = await preservarPdfEnSupabase(idModulo, codigoFinal, item.url, null);
+                        codigoFinal = resPdfDirect.tituloFinal || codigoFinal;
+                        urlFinal = resPdfDirect.urlPublica;
                     } else {
                         mostrarToast({
                             tipo: 'info',
@@ -1714,6 +2645,7 @@
 
         try {
             const enPaginaPdfDirecta = esUrlPdfDirecto(window.location.href);
+            const enPaginaCurso = /\/course\/view\.php/i.test(window.location.pathname);
             const idModulo = obtenerIdModulo();
             const nombreModuloH1 = obtenerNombreModuloH1(document, idModulo);
 
@@ -1730,10 +2662,26 @@
                 }
             }
 
-            // 2. Si estamos en la vista del curso en UVEG (y no en un PDF abierto directamente), escanear secciones 2, 3 y 4 secuencialmente
-            if (!enPaginaPdfDirecta && idModulo && hostname.endsWith('uveg.edu.mx')) {
+            // 2. Si estamos en la vista del curso en UVEG, escanear secciones 2, 3 y 4 y actividades Moodle secuencialmente
+            if (!enPaginaPdfDirecta && enPaginaCurso && idModulo && hostname.endsWith('uveg.edu.mx')) {
                 await escanearTodasLasSecciones(idModulo);
+            } else if (!enPaginaPdfDirecta && !enPaginaCurso && hostname.endsWith('uveg.edu.mx')) {
+                // Si el usuario abrió directamente una lección Moodle (/mod/page/, /mod/hvp/), resolver sub-iframes H5P locales
+                const estenograficasLocales = new Set();
+                for (const it of itemsAcumulados) {
+                    if (it.esEstenografica) {
+                        const cl = (it.numero && it.numero !== 999) ? `num_${it.numero}` : `tit_${normalizarTextoSimple(it.nombre || it.codigo)}`;
+                        estenograficasLocales.add(cl);
+                    }
+                }
+                const actsLocales = recolectarActividadesMoodleEnDocumento(document);
+                if (actsLocales.length > 0) {
+                    await resolverActividadesMoodle(actsLocales, urlsVistas, estenograficasLocales);
+                }
             }
+
+            // Resolver URLs acortadas de enlaces.uveg.edu.mx a su destino real (ej. Google Drive) antes de deduplicar/sincronizar
+            await resolverItemsEnlacesUveg(itemsAcumulados);
 
             if (itemsAcumulados.length === 0) {
                 return;
@@ -1741,8 +2689,9 @@
 
             const mapaGlobalPLeccion = cargarMapaPLeccion(idModulo);
 
-            // Deduplicar por URL y por clave de lección (sin que un PDF como L3_Comic colisione con el SCORM LEC_L3)
+            // Deduplicar por URL y por clave de lección (separando principal, YouTube, PDFs y 1 versión estenográfica por lección)
             const porClave = new Map();
+            const estenograficasVistas = new Set();
             const sinNumero = [];
             const urlsUnicasVistas = new Set();
 
@@ -1752,21 +2701,52 @@
                 urlsUnicasVistas.add(norm);
 
                 const cod = it.codigo || it.titulo || SIN_TITULO;
-                const num = it.numero ?? extraerNumeroLeccion(cod);
-                const nomVisual = (num !== null && num !== 999 && mapaGlobalPLeccion[String(num)])
-                    ? mapaGlobalPLeccion[String(num)]
-                    : (it.nombre || cod);
+                const num = it.numero ?? extraerNumeroLeccion(cod) ?? extraerNumeroLeccion(it.nombre);
+                const esEsteno = Boolean(it.esEstenografica) || esUrlEstenografica(it.url, it.nombre);
+                const esYoutube = Boolean(it.esYoutube) || esUrlYoutube(it.url);
+
+                if (esEsteno) {
+                    const clEst = (num !== null && num !== 999)
+                        ? `num_${num}`
+                        : `tit_${normalizarTextoSimple(it.nombre || cod)}`;
+                    if (estenograficasVistas.has(clEst)) continue;
+                    estenograficasVistas.add(clEst);
+                }
+
+                let nomVisual = it.nombre || cod;
+                if (num !== null && num !== 999 && mapaGlobalPLeccion[String(num)]) {
+                    const nomBase = mapaGlobalPLeccion[String(num)];
+                    if (esEsteno) {
+                        nomVisual = `${nomBase} - Versión estenográfica`;
+                    } else if (!nomVisual || nomVisual === cod || /^L\d+(?:_Video)?$/i.test(nomVisual)) {
+                        nomVisual = nomBase;
+                    }
+                } else if (esEsteno && nomVisual && !/versi[oó]n estenogr[aá]fica/i.test(nomVisual)) {
+                    nomVisual = `${nomVisual} - Versión estenográfica`;
+                }
 
                 const itemEnriquecido = {
                     ...it,
                     codigo: cod,
                     nombre: nomVisual,
                     titulo: cod,
-                    numero: num !== null ? num : 999
+                    numero: num !== null ? num : 999,
+                    esEstenografica: esEsteno,
+                    esYoutube: esYoutube
                 };
 
                 if (num !== null && num !== 999) {
-                    const clave = it.esPdf ? `${num}_pdf_${crearSlug(cod || it.url)}` : `${num}_main`;
+                    let clave;
+                    if (esEsteno) {
+                        clave = `${num}_pdf_estenografica`;
+                    } else if (it.esPdf) {
+                        clave = `${num}_pdf_${crearSlug(cod || it.url)}`;
+                    } else if (esYoutube) {
+                        const ytId = extraerYoutubeId(it.url) || cod;
+                        clave = `${num}_yt_${ytId}`;
+                    } else {
+                        clave = `${num}_main`;
+                    }
                     const existente = porClave.get(clave);
                     if (!existente || (esUrlGenially(it.url) && !esUrlGenially(existente.url))) {
                         porClave.set(clave, itemEnriquecido);

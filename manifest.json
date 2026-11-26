@@ -15,6 +15,9 @@
       "128": "img/icon-128.png"
     }
   },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -32,9 +35,13 @@
   ],
   "host_permissions": [
     "https://*.uveg.edu.mx/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*",
+    "https://drive.google.com/*",
+    "https://drive.usercontent.google.com/*",
+    "https://*.googleusercontent.com/*",
     "https://planificador-personal-production-jm5erh.laravel.cloud/*",
-    "https://*.supabase.co/*"
+    "https://*.supabase.co/*",
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ]
 }
