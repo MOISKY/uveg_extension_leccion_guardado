@@ -38,9 +38,9 @@
     "https://drive.google.com/*",
     "https://drive.usercontent.google.com/*",
     "https://*.googleusercontent.com/*",
+    "https://docs.google.com/*",
     "https://planificador-personal-production-jm5erh.laravel.cloud/*",
     "https://*.supabase.co/*",
-    "https://*/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ]
